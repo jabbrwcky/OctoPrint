@@ -1,5 +1,5 @@
 # coding=utf-8
-from __future__ import absolute_import
+from __future__ import absolute_import, division, print_function
 
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = 'GNU Affero General Public License http://www.gnu.org/licenses/agpl.html'
@@ -7,69 +7,358 @@ __copyright__ = "Copyright (C) 2015 The OctoPrint Project - Released under terms
 
 import os
 import datetime
+import codecs
+
+from past.builtins import basestring
 
 from collections import defaultdict
-from flask import request, g, url_for, make_response, render_template, send_from_directory, redirect
+from flask import request, g, url_for, make_response, render_template, send_from_directory, redirect, abort
 
 import octoprint.plugin
 
 from octoprint.server import app, userManager, pluginManager, gettext, \
-	debug, LOCALES, VERSION, DISPLAY_VERSION, UI_API_KEY, BRANCH
+	debug, LOCALES, VERSION, DISPLAY_VERSION, UI_API_KEY, BRANCH, preemptiveCache, \
+	NOT_MODIFIED
 from octoprint.settings import settings
+from octoprint.filemanager import get_all_extensions
+from octoprint.util import to_unicode
 
 import re
+import base64
 
 from . import util
 
 import logging
 _logger = logging.getLogger(__name__)
 
-_templates = None
+_templates = dict()
 _plugin_names = None
 _plugin_vars = None
 
 _valid_id_re = re.compile("[a-z_]+")
 _valid_div_re = re.compile("[a-zA-Z_-]+")
 
+def _preemptive_unless(base_url=None, additional_unless=None):
+	if base_url is None:
+		base_url = request.url_root
+
+	disabled_for_root = not settings().getBoolean(["devel", "cache", "preemptive"]) \
+	                    or base_url in settings().get(["server", "preemptiveCache", "exceptions"]) \
+	                    or not (base_url.startswith("http://") or base_url.startswith("https://"))
+
+	recording_disabled = request.headers.get("X-Preemptive-Record", "yes") == "no"
+
+	if callable(additional_unless):
+		return recording_disabled or disabled_for_root or additional_unless()
+	else:
+		return recording_disabled or disabled_for_root
+
+def _preemptive_data(key, path=None, base_url=None, data=None, additional_request_data=None):
+	if path is None:
+		path = request.path
+	if base_url is None:
+		base_url = request.url_root
+
+	d = dict(path=path,
+	         base_url=base_url,
+	         query_string="l10n={}".format(g.locale.language if g.locale else "en"))
+
+	if key != "_default":
+		d["plugin"] = key
+
+	# add data if we have any
+	if data is not None:
+		try:
+			if callable(data):
+				data = data()
+			if data:
+				if "query_string" in data:
+					data["query_string"] = "l10n={}&{}".format(g.locale.language, data["query_string"])
+				d.update(data)
+		except:
+			_logger.exception("Error collecting data for preemptive cache from plugin {}".format(key))
+
+	# add additional request data if we have any
+	if callable(additional_request_data):
+		try:
+			ard = additional_request_data()
+			if ard:
+				d.update(dict(
+					_additional_request_data=ard
+				))
+		except:
+			_logger.exception("Error retrieving additional data for preemptive cache from plugin {}".format(key))
+
+	return d
+
+def _cache_key(ui, url=None, locale=None, additional_key_data=None):
+	if url is None:
+		url = request.base_url
+	if locale is None:
+		locale = g.locale.language if g.locale else "en"
+
+	k = "ui:{}:{}:{}".format(ui, url, locale)
+	if callable(additional_key_data):
+		try:
+			ak = additional_key_data()
+			if ak:
+				# we have some additional key components, let's attach them
+				if not isinstance(ak, (list, tuple)):
+					ak = [ak]
+				k = "{}:{}".format(k, ":".join(ak))
+		except:
+			_logger.exception("Error while trying to retrieve additional cache key parts for ui {}".format(ui))
+	return k
+
+def _valid_status_for_cache(status_code):
+	return 200 <= status_code < 400
+
+@app.route("/cached.gif")
+def in_cache():
+	url = request.base_url.replace("/cached.gif", "/")
+	path = request.path.replace("/cached.gif", "/")
+	base_url = request.url_root
+
+	# select view from plugins and fall back on default view if no plugin will handle it
+	ui_plugins = pluginManager.get_implementations(octoprint.plugin.UiPlugin,
+	                                               sorting_context="UiPlugin.on_ui_render")
+	for plugin in ui_plugins:
+		if plugin.will_handle_ui(request):
+			ui = plugin._identifier
+			key = _cache_key(plugin._identifier,
+			                 url=url,
+			                 additional_key_data=plugin.get_ui_additional_key_data_for_cache)
+			unless = _preemptive_unless(url, additional_unless=plugin.get_ui_preemptive_caching_additional_unless)
+			data = _preemptive_data(plugin._identifier,
+			                        path=path,
+			                        base_url=base_url,
+			                        data=plugin.get_ui_data_for_preemptive_caching,
+			                        additional_request_data=plugin.get_ui_additional_request_data_for_preemptive_caching)
+			break
+	else:
+		ui = "_default"
+		key = _cache_key("_default", url=url)
+		unless = _preemptive_unless(url)
+		data = _preemptive_data("_default", path=path, base_url=base_url)
+
+	response = make_response(bytes(base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")))
+	response.headers["Content-Type"] = "image/gif"
+
+	if unless or not preemptiveCache.has_record(data, root=path):
+		_logger.info("Preemptive cache not active for path {}, ui {} and data {!r}, signaling as cached".format(path, ui, data))
+		return response
+	elif util.flask.is_in_cache(key):
+		_logger.info("Found path {} in cache (key: {}), signaling as cached".format(path, key))
+		return response
+	elif util.flask.is_cache_bypassed(key):
+		_logger.info("Path {} was bypassed from cache (key: {}), signaling as cached".format(path, key))
+		return response
+	else:
+		_logger.debug("Path {} not yet cached (key: {}), signaling as missing".format(path, key))
+		return abort(404)
+
 @app.route("/")
 def index():
 	global _templates, _plugin_names, _plugin_vars
+
+	preemptive_cache_enabled = settings().getBoolean(["devel", "cache", "preemptive"])
+
+	locale = g.locale.language if g.locale else "en"
 
 	# helper to check if wizards are active
 	def wizard_active(templates):
 		return templates is not None and bool(templates["wizard"]["order"])
 
 	# we force a refresh if the client forces one or if we have wizards cached
-	force_refresh = util.flask.cache_check_headers() or "_refresh" in request.values or wizard_active(_templates)
+	force_refresh = util.flask.cache_check_headers() or "_refresh" in request.values or wizard_active(_templates.get(locale))
 
 	# if we need to refresh our template cache or it's not yet set, process it
-	if force_refresh or _templates is None or _plugin_names is None or _plugin_vars is None:
-		_templates, _plugin_names, _plugin_vars = _process_templates()
+	fetch_template_data(refresh=force_refresh)
 
 	now = datetime.datetime.utcnow()
-	render_kwargs = _get_render_kwargs(_templates, _plugin_names, _plugin_vars, now)
 
-	def get_cached_view(key, view):
-		return util.flask.cached(refreshif=lambda: force_refresh,
-		                         key=lambda: "ui:{}:{}".format(key, g.locale),
-		                         unless_response=util.flask.cache_check_response_headers)(view)
+	enable_accesscontrol = userManager.enabled
+	enable_gcodeviewer = settings().getBoolean(["gcodeViewer", "enabled"])
+	enable_timelapse = bool(settings().get(["webcam", "snapshot"]) and settings().get(["webcam", "ffmpeg"]))
 
-	ui_plugins = pluginManager.get_implementations(octoprint.plugin.UiPlugin, sorting_context="UiPlugin.on_ui_render")
-	for plugin in ui_plugins:
-		if plugin.will_handle_ui(request):
-			# plugin claims responsibility, let it render the UI
-			cached = get_cached_view(plugin._identifier, plugin.on_ui_render)
-			response = cached(now, request, render_kwargs)
-			if response is not None:
-				break
+	def default_template_filter(template_type, template_key):
+		if template_type == "navbar":
+			return template_key != "login" or enable_accesscontrol
+		elif template_type == "tab":
+			return (template_key != "gcodeviewer" or enable_gcodeviewer) and \
+			       (template_key != "timelapse" or enable_timelapse)
+		elif template_type == "settings":
+			return template_key != "accesscontrol" or enable_accesscontrol
+		elif template_type == "usersettings":
+			return enable_accesscontrol
+		else:
+			return True
 
-	else:
-		wizard = wizard_active(_templates)
-		enable_accesscontrol = userManager is not None
+	default_additional_etag = [enable_accesscontrol,
+	                           enable_gcodeviewer,
+	                           enable_timelapse]
+
+	def get_preemptively_cached_view(key, view, data=None, additional_request_data=None, additional_unless=None):
+		if (data is None and additional_request_data is None) or g.locale is None:
+			return view
+
+		d = _preemptive_data(key, data=data, additional_request_data=additional_request_data)
+
+		def unless():
+			return _preemptive_unless(base_url=request.url_root, additional_unless=additional_unless)
+
+		# finally decorate our view
+		return util.flask.preemptively_cached(cache=preemptiveCache,
+		                                      data=d,
+		                                      unless=unless)(view)
+
+	def get_cached_view(key, view, additional_key_data=None, additional_files=None, additional_etag=None, custom_files=None, custom_etag=None, custom_lastmodified=None):
+		if additional_etag is None:
+			additional_etag = []
+
+		def cache_key():
+			return _cache_key(key, additional_key_data=additional_key_data)
+
+		def check_etag_and_lastmodified():
+			files = collect_files()
+			lastmodified = compute_lastmodified(files)
+			lastmodified_ok = util.flask.check_lastmodified(lastmodified)
+			etag_ok = util.flask.check_etag(compute_etag(files=files,
+			                                             lastmodified=lastmodified,
+			                                             additional=[cache_key()] + additional_etag))
+			return lastmodified_ok and etag_ok
+
+		def validate_cache(cached):
+			etag_different = compute_etag(additional=[cache_key()] + additional_etag) != cached.get_etag()[0]
+			return force_refresh or etag_different
+
+		def collect_files():
+			if callable(custom_files):
+				try:
+					files = custom_files()
+					if files:
+						return files
+				except:
+					_logger.exception("Error while trying to retrieve tracked files for plugin {}".format(key))
+
+			templates = _get_all_templates()
+			assets = _get_all_assets()
+			translations = _get_all_translationfiles(g.locale.language if g.locale else "en",
+			                                         "messages")
+
+			files = templates + assets + translations
+
+			if callable(additional_files):
+				try:
+					af = additional_files()
+					if af:
+						files += af
+				except:
+					_logger.exception("Error while trying to retrieve additional tracked files for plugin {}".format(key))
+
+			return sorted(set(files))
+
+		def compute_lastmodified(files=None):
+			if callable(custom_lastmodified):
+				try:
+					lastmodified = custom_lastmodified()
+					if lastmodified:
+						return lastmodified
+				except:
+					_logger.exception("Error while trying to retrieve custom LastModified value for plugin {}".format(key))
+
+			if files is None:
+				files = collect_files()
+			return _compute_date(files)
+
+		def compute_etag(files=None, lastmodified=None, additional=None):
+			if callable(custom_etag):
+				try:
+					etag = custom_etag()
+					if etag:
+						return etag
+				except:
+					_logger.exception("Error while trying to retrieve custom ETag value for plugin {}".format(key))
+
+			if files is None:
+				files = collect_files()
+			if lastmodified is None:
+				lastmodified = compute_lastmodified(files)
+			if lastmodified and not isinstance(lastmodified, basestring):
+				from werkzeug.http import http_date
+				lastmodified = http_date(lastmodified)
+			if additional is None:
+				additional = []
+
+			import hashlib
+			hash = hashlib.sha1()
+			hash.update(octoprint.__version__)
+			hash.update(octoprint.server.UI_API_KEY)
+			hash.update(",".join(sorted(files)))
+			if lastmodified:
+				hash.update(lastmodified)
+			for add in additional:
+				hash.update(str(add))
+			return hash.hexdigest()
+
+		decorated_view = view
+		decorated_view = util.flask.lastmodified(lambda _: compute_lastmodified())(decorated_view)
+		decorated_view = util.flask.etagged(lambda _: compute_etag(additional=[cache_key()] + additional_etag))(decorated_view)
+		decorated_view = util.flask.cached(timeout=-1,
+		                                   refreshif=validate_cache,
+		                                   key=cache_key,
+		                                   unless_response=lambda response: util.flask.cache_check_response_headers(response) or util.flask.cache_check_status_code(response, _valid_status_for_cache))(decorated_view)
+		decorated_view = util.flask.conditional(check_etag_and_lastmodified, NOT_MODIFIED)(decorated_view)
+		return decorated_view
+
+	def plugin_view(p):
+		cached = get_cached_view(p._identifier,
+		                         p.on_ui_render,
+		                         additional_key_data=p.get_ui_additional_key_data_for_cache,
+		                         additional_files=p.get_ui_additional_tracked_files,
+		                         custom_files=p.get_ui_custom_tracked_files,
+		                         custom_etag=p.get_ui_custom_etag,
+		                         custom_lastmodified=p.get_ui_custom_lastmodified,
+		                         additional_etag=p.get_ui_additional_etag(default_additional_etag))
+
+		if preemptive_cache_enabled and p.get_ui_preemptive_caching_enabled():
+			view = get_preemptively_cached_view(p._identifier,
+			                                    cached,
+			                                    p.get_ui_data_for_preemptive_caching,
+			                                    p.get_ui_additional_request_data_for_preemptive_caching,
+			                                    p.get_ui_preemptive_caching_additional_unless)
+		else:
+			view = cached
+
+		template_filter = p.get_ui_custom_template_filter(default_template_filter)
+		if template_filter is not None and callable(template_filter):
+			filtered_templates = _filter_templates(_templates[locale], template_filter)
+		else:
+			filtered_templates = _templates[locale]
+
+		render_kwargs = _get_render_kwargs(filtered_templates,
+		                                   _plugin_names,
+		                                   _plugin_vars,
+		                                   now)
+
+		return view(now, request, render_kwargs)
+
+	def default_view():
+		filtered_templates = _filter_templates(_templates[locale], default_template_filter)
+
+		wizard = wizard_active(filtered_templates)
+		accesscontrol_active = enable_accesscontrol and userManager.hasBeenCustomized()
+
+		render_kwargs = _get_render_kwargs(filtered_templates,
+		                                   _plugin_names,
+		                                   _plugin_vars,
+		                                   now)
+
 		render_kwargs.update(dict(
 			webcamStream=settings().get(["webcam", "stream"]),
 			enableTemperatureGraph=settings().get(["feature", "temperatureGraph"]),
 			enableAccessControl=enable_accesscontrol,
+			accessControlActive=accesscontrol_active,
 			enableSdSupport=settings().get(["feature", "sdSupport"]),
 			gcodeMobileThreshold=settings().get(["gcodeViewer", "mobileSizeThreshold"]),
 			gcodeThreshold=settings().get(["gcodeViewer", "sizeThreshold"]),
@@ -85,11 +374,45 @@ def index():
 				r = util.flask.add_non_caching_response_headers(r)
 			return r
 
-		cached = get_cached_view("_default", make_default_ui)
-		response = cached()
+		cached = get_cached_view("_default",
+		                         make_default_ui,
+		                         additional_etag=default_additional_etag)
+		preemptively_cached = get_preemptively_cached_view("_default",
+		                                                   cached,
+		                                                   dict(),
+		                                                   dict())
+		return preemptively_cached()
 
-	response.headers["Last-Modified"] = now
+	response = None
 
+	forced_view = request.headers.get("X-Force-View", None)
+
+	if forced_view:
+		# we have view forced by the preemptive cache
+		_logger.debug("Forcing rendering of view {}".format(forced_view))
+		if forced_view != "_default":
+			plugin = pluginManager.get_plugin_info(forced_view, require_enabled=True)
+			if plugin is not None and isinstance(plugin.implementation, octoprint.plugin.UiPlugin):
+				response = plugin_view(plugin.implementation)
+		else:
+			response = default_view()
+
+	else:
+		# select view from plugins and fall back on default view if no plugin will handle it
+		ui_plugins = pluginManager.get_implementations(octoprint.plugin.UiPlugin, sorting_context="UiPlugin.on_ui_render")
+		for plugin in ui_plugins:
+			if plugin.will_handle_ui(request):
+				# plugin claims responsibility, let it render the UI
+				response = plugin_view(plugin)
+				if response is not None:
+					break
+				else:
+					_logger.warn("UiPlugin {} returned an empty response".format(plugin._identifier))
+		else:
+			response = default_view()
+
+	if response is None:
+		return abort(404)
 	return response
 
 
@@ -98,6 +421,7 @@ def _get_render_kwargs(templates, plugin_names, plugin_vars, now):
 
 	first_run = settings().getBoolean(["server", "firstRun"])
 	locales = dict((l.language, dict(language=l.language, display=l.display_name, english=l.english_name)) for l in LOCALES)
+	extensions = map(lambda ext: ".{}".format(ext), get_all_extensions())
 
 	#~~ prepare full set of template vars for rendering
 
@@ -109,19 +433,22 @@ def _get_render_kwargs(templates, plugin_names, plugin_vars, now):
 		templates=templates,
 		pluginNames=plugin_names,
 		locales=locales,
+		supportedExtensions=extensions
 	)
 	render_kwargs.update(plugin_vars)
 
 	return render_kwargs
 
 
-def _process_templates():
-	enable_accesscontrol = userManager is not None
+def fetch_template_data(refresh=False):
+	global _templates, _plugin_names, _plugin_vars
+
+	locale = g.locale.language if g.locale else "en"
+
+	if not refresh and _templates.get(locale) is not None and _plugin_names is not None and _plugin_vars is not None:
+		return _templates[locale], _plugin_names, _plugin_vars
+
 	first_run = settings().getBoolean(["server", "firstRun"])
-	enable_gcodeviewer = settings().getBoolean(["gcodeViewer", "enabled"])
-	enable_timelapse = (settings().get(["webcam", "snapshot"]) and settings().get(["webcam", "ffmpeg"]))
-	enable_systemmenu = settings().get(["system"]) is not None and settings().get(["system", "actions"]) is not None and len(settings().get(["system", "actions"])) > 0
-	preferred_stylesheet = settings().get(["devel", "stylesheet"])
 
 	##~~ prepare templates
 
@@ -140,13 +467,26 @@ def _process_templates():
 	)
 
 	# sorting orders
+	def wizard_key_extractor(d, k):
+		if d[1].get("_key", None) == "plugin_corewizard_acl":
+			# Ultra special case - we MUST always have the ACL wizard first since otherwise any steps that follow and
+			# that require to access APIs to function will run into errors since those APIs won't work before ACL
+			# has been configured. See also #2140
+			return u"0:{}".format(to_unicode(d[0]))
+		elif d[1].get("mandatory", False):
+			# Other mandatory steps come before the optional ones
+			return u"1:{}".format(to_unicode(d[0]))
+		else:
+			# Finally everything else
+			return u"2:{}".format(to_unicode(d[0]))
+
 	template_sorting = dict(
 		navbar=dict(add="prepend", key=None),
 		sidebar=dict(add="append", key="name"),
 		tab=dict(add="append", key="name"),
 		settings=dict(add="custom_append", key="name", custom_add_entries=lambda missing: dict(section_plugins=(gettext("Plugins"), None)), custom_add_order=lambda missing: ["section_plugins"] + missing),
 		usersettings=dict(add="append", key="name"),
-		wizard=dict(add="append", key="name", key_extractor=lambda d, k: "0:{}".format(d[0]) if "mandatory" in d[1] and d[1]["mandatory"] else "1:{}".format(d[0])),
+		wizard=dict(add="append", key="name", key_extractor=wizard_key_extractor),
 		about=dict(add="append", key="name"),
 		generic=dict(add="append", key=None)
 	)
@@ -193,18 +533,16 @@ def _process_templates():
 	# navbar
 
 	templates["navbar"]["entries"] = dict(
-		settings=dict(template="navbar/settings.jinja2", _div="navbar_settings", styles=["display: none"], data_bind="visible: loginState.isAdmin")
+		settings=dict(template="navbar/settings.jinja2", _div="navbar_settings", styles=["display: none"], data_bind="visible: loginState.isAdmin"),
+		systemmenu=dict(template="navbar/systemmenu.jinja2", _div="navbar_systemmenu", styles=["display: none"], classes=["dropdown"], data_bind="visible: loginState.isAdmin", custom_bindings=False),
+		login=dict(template="navbar/login.jinja2", _div="navbar_login", classes=["dropdown"], custom_bindings=False),
 	)
-	if enable_accesscontrol:
-		templates["navbar"]["entries"]["login"] = dict(template="navbar/login.jinja2", _div="navbar_login", classes=["dropdown"], custom_bindings=False)
-	if enable_systemmenu:
-		templates["navbar"]["entries"]["systemmenu"] = dict(template="navbar/systemmenu.jinja2", _div="navbar_systemmenu", styles=["display: none"], classes=["dropdown"], data_bind="visible: loginState.isAdmin", custom_bindings=False)
 
 	# sidebar
 
 	templates["sidebar"]["entries"]= dict(
-		connection=(gettext("Connection"), dict(template="sidebar/connection.jinja2", _div="connection", icon="signal", styles_wrapper=["display: none"], data_bind="visible: loginState.isAdmin")),
-		state=(gettext("State"), dict(template="sidebar/state.jinja2", _div="state", icon="info-sign")),
+		connection=(gettext("Connection"), dict(template="sidebar/connection.jinja2", _div="connection", icon="signal", styles_wrapper=["display: none"], data_bind="visible: loginState.isUser", template_header="sidebar/connection_header.jinja2")),
+		state=(gettext("State"), dict(template="sidebar/state.jinja2", _div="state", icon="info-circle")),
 		files=(gettext("Files"), dict(template="sidebar/files.jinja2", _div="files", icon="list", classes_content=["overflow_visible"], template_header="sidebar/files_header.jinja2"))
 	)
 
@@ -213,12 +551,10 @@ def _process_templates():
 	templates["tab"]["entries"] = dict(
 		temperature=(gettext("Temperature"), dict(template="tabs/temperature.jinja2", _div="temp")),
 		control=(gettext("Control"), dict(template="tabs/control.jinja2", _div="control")),
+		gcodeviewer=(gettext("GCode Viewer"), dict(template="tabs/gcodeviewer.jinja2", _div="gcode")),
 		terminal=(gettext("Terminal"), dict(template="tabs/terminal.jinja2", _div="term")),
+		timelapse=(gettext("Timelapse"), dict(template="tabs/timelapse.jinja2", _div="timelapse"))
 	)
-	if enable_gcodeviewer:
-		templates["tab"]["entries"]["gcodeviewer"] = (gettext("GCode Viewer"), dict(template="tabs/gcodeviewer.jinja2", _div="gcode"))
-	if enable_timelapse:
-		templates["tab"]["entries"]["timelapse"] = (gettext("Timelapse"), dict(template="tabs/timelapse.jinja2", _div="timelapse"))
 
 	# settings dialog
 
@@ -235,25 +571,23 @@ def _process_templates():
 
 		features=(gettext("Features"), dict(template="dialogs/settings/features.jinja2", _div="settings_features", custom_bindings=False)),
 		webcam=(gettext("Webcam & Timelapse"), dict(template="dialogs/settings/webcam.jinja2", _div="settings_webcam", custom_bindings=False)),
+		gcodevisualizer=(gettext("GCODE Visualizer"), dict(template="dialogs/settings/gcodevisualizer.jinja2", _div="settings_gcodegcodevisualizer", custom_bindings=False)),
 		api=(gettext("API"), dict(template="dialogs/settings/api.jinja2", _div="settings_api", custom_bindings=False)),
 
 		section_octoprint=(gettext("OctoPrint"), None),
 
+		accesscontrol=(gettext("Access Control"), dict(template="dialogs/settings/accesscontrol.jinja2", _div="settings_users", custom_bindings=False)),
 		folders=(gettext("Folders"), dict(template="dialogs/settings/folders.jinja2", _div="settings_folders", custom_bindings=False)),
 		appearance=(gettext("Appearance"), dict(template="dialogs/settings/appearance.jinja2", _div="settings_appearance", custom_bindings=False)),
-		logs=(gettext("Logs"), dict(template="dialogs/settings/logs.jinja2", _div="settings_logs")),
 		server=(gettext("Server"), dict(template="dialogs/settings/server.jinja2", _div="settings_server", custom_bindings=False)),
 	)
-	if enable_accesscontrol:
-		templates["settings"]["entries"]["accesscontrol"] = (gettext("Access Control"), dict(template="dialogs/settings/accesscontrol.jinja2", _div="settings_users", custom_bindings=False))
 
 	# user settings dialog
 
-	if enable_accesscontrol:
-		templates["usersettings"]["entries"] = dict(
-			access=(gettext("Access"), dict(template="dialogs/usersettings/access.jinja2", _div="usersettings_access", custom_bindings=False)),
-			interface=(gettext("Interface"), dict(template="dialogs/usersettings/interface.jinja2", _div="usersettings_interface", custom_bindings=False)),
-		)
+	templates["usersettings"]["entries"] = dict(
+		access=(gettext("Access"), dict(template="dialogs/usersettings/access.jinja2", _div="usersettings_access", custom_bindings=False)),
+		interface=(gettext("Interface"), dict(template="dialogs/usersettings/interface.jinja2", _div="usersettings_interface", custom_bindings=False)),
+	)
 
 	# wizard
 
@@ -275,11 +609,12 @@ def _process_templates():
 	# about dialog
 
 	templates["about"]["entries"] = dict(
-		about=(gettext("About OctoPrint"), dict(template="dialogs/about/about.jinja2", _div="about_about", custom_bindings=False)),
-		license=(gettext("OctoPrint License"), dict(template="dialogs/about/license.jinja2", _div="about_license", custom_bindings=False)),
-		thirdparty=(gettext("Third Party Licenses"), dict(template="dialogs/about/thirdparty.jinja2", _div="about_thirdparty", custom_bindings=False)),
-		authors=(gettext("Authors"), dict(template="dialogs/about/authors.jinja2", _div="about_authors", custom_bindings=False)),
-		changelog=(gettext("Changelog"), dict(template="dialogs/about/changelog.jinja2", _div="about_changelog", custom_bindings=False))
+		about=("About OctoPrint", dict(template="dialogs/about/about.jinja2", _div="about_about", custom_bindings=False)),
+		license=("OctoPrint License", dict(template="dialogs/about/license.jinja2", _div="about_license", custom_bindings=False)),
+		thirdparty=("Third Party Licenses", dict(template="dialogs/about/thirdparty.jinja2", _div="about_thirdparty", custom_bindings=False)),
+		authors=("Authors", dict(template="dialogs/about/authors.jinja2", _div="about_authors", custom_bindings=False)),
+		changelog=("Changelog", dict(template="dialogs/about/changelog.jinja2", _div="about_changelog", custom_bindings=False)),
+		supporters=("Supporters", dict(template="dialogs/about/supporters.jinja2", _div="about_sponsors", custom_bindings=False))
 	)
 
 	# extract data from template plugins
@@ -412,6 +747,10 @@ def _process_templates():
 			templates[t]["entries"].update(template_sorting[t]["custom_insert_entries"](sorted_missing))
 			templates[t]["order"] = template_sorting[t]["custom_insert_order"](templates[t]["order"], sorted_missing)
 
+	_templates[locale] = templates
+	_plugin_names = plugin_names
+	_plugin_vars = plugin_vars
+
 	return templates, plugin_names, plugin_vars
 
 
@@ -458,6 +797,7 @@ def _process_template_configs(name, implementation, configs, rules):
 
 	return includes
 
+
 def _process_template_config(name, implementation, rule, config=None, counter=1):
 	if "mandatory" in rule:
 		for mandatory in rule["mandatory"]:
@@ -498,80 +838,40 @@ def _process_template_config(name, implementation, rule, config=None, counter=1)
 	if "suffix" in data:
 		data["_key"] += data["suffix"]
 
+	data["_plugin"] = name
+
 	return data
 
 
+def _filter_templates(templates, template_filter):
+	filtered_templates = dict()
+	for template_type, template_collection in templates.items():
+		filtered_entries = dict()
+		for template_key, template_entry in template_collection["entries"].items():
+			if template_filter(template_type, template_key):
+				filtered_entries[template_key] = template_entry
+		filtered_templates[template_type] = dict(order=filter(lambda x: x in filtered_entries,
+		                                                      template_collection["order"]),
+		                                         entries=filtered_entries)
+	return filtered_templates
+
+
 @app.route("/robots.txt")
+@util.flask.cached(timeout=-1)
 def robotsTxt():
 	return send_from_directory(app.static_folder, "robots.txt")
 
 
 @app.route("/i18n/<string:locale>/<string:domain>.js")
-@util.flask.cached(refreshif=lambda: util.flask.cache_check_headers() or "_refresh" in request.values,
-                   key=lambda: "{}:{}".format(request.path, g.locale))
+@util.flask.conditional(lambda: _check_etag_and_lastmodified_for_i18n(), NOT_MODIFIED)
+@util.flask.etagged(lambda _: _compute_etag_for_i18n(request.view_args["locale"], request.view_args["domain"]))
+@util.flask.lastmodified(lambda _: _compute_date_for_i18n(request.view_args["locale"], request.view_args["domain"]))
 def localeJs(locale, domain):
 	messages = dict()
 	plural_expr = None
 
 	if locale != "en":
-		from flask import _request_ctx_stack
-		from babel.messages.pofile import read_po
-
-		def messages_from_po(base_path, locale, domain):
-			path = os.path.join(base_path, locale)
-			if not os.path.isdir(path):
-				return None, None
-
-			path = os.path.join(path, "LC_MESSAGES", "{domain}.po".format(**locals()))
-			if not os.path.isfile(path):
-				return None, None
-
-			messages = dict()
-			with file(path) as f:
-				catalog = read_po(f, locale=locale, domain=domain)
-
-				for message in catalog:
-					message_id = message.id
-					if isinstance(message_id, (list, tuple)):
-						message_id = message_id[0]
-					messages[message_id] = message.string
-
-			return messages, catalog.plural_expr
-
-		user_base_path = os.path.join(settings().getBaseFolder("translations"))
-		user_plugin_path = os.path.join(user_base_path, "_plugins")
-
-		# plugin translations
-		plugins = octoprint.plugin.plugin_manager().enabled_plugins
-		for name, plugin in plugins.items():
-			dirs = [os.path.join(user_plugin_path, name), os.path.join(plugin.location, 'translations')]
-			for dirname in dirs:
-				if not os.path.isdir(dirname):
-					continue
-
-				plugin_messages, _ = messages_from_po(dirname, locale, domain)
-
-				if plugin_messages is not None:
-					messages = octoprint.util.dict_merge(messages, plugin_messages)
-					_logger.debug("Using translation folder {dirname} for locale {locale} of plugin {name}".format(**locals()))
-					break
-			else:
-				_logger.debug("No translations for locale {locale} for plugin {name}".format(**locals()))
-
-		# core translations
-		ctx = _request_ctx_stack.top
-		base_path = os.path.join(ctx.app.root_path, "translations")
-
-		dirs = [user_base_path, base_path]
-		for dirname in dirs:
-			core_messages, plural_expr = messages_from_po(dirname, locale, domain)
-
-			if core_messages is not None:
-				messages = octoprint.util.dict_merge(messages, core_messages)
-				_logger.debug("Using translation folder {dirname} for locale {locale} of core translations".format(**locals()))
-				break
-		else:
-			_logger.debug("No core translations for locale {locale}".format(**locals()))
+		messages, plural_expr = _get_translations(locale, domain)
 
 	catalog = dict(
 		messages=messages,
@@ -588,3 +888,131 @@ def localeJs(locale, domain):
 def plugin_assets(name, filename):
 	return redirect(url_for("plugin." + name + ".static", filename=filename))
 
+
+def _compute_etag_for_i18n(locale, domain, files=None, lastmodified=None):
+	if files is None:
+		files = _get_all_translationfiles(locale, domain)
+	if lastmodified is None:
+		lastmodified = _compute_date(files)
+	if lastmodified and not isinstance(lastmodified, basestring):
+		from werkzeug.http import http_date
+		lastmodified = http_date(lastmodified)
+
+	import hashlib
+	hash = hashlib.sha1()
+	hash.update(",".join(sorted(files)))
+	if lastmodified:
+		hash.update(lastmodified)
+	return hash.hexdigest()
+
+
+def _compute_date_for_i18n(locale, domain):
+	return _compute_date(_get_all_translationfiles(locale, domain))
+
+
+def _compute_date(files):
+	from datetime import datetime
+	timestamps = map(lambda path: os.stat(path).st_mtime, files) + [0] if files else []
+	max_timestamp = max(*timestamps) if timestamps else None
+	if max_timestamp:
+		# we set the micros to 0 since microseconds are not speced for HTTP
+		max_timestamp = datetime.fromtimestamp(max_timestamp).replace(microsecond=0)
+	return max_timestamp
+
+
+def _check_etag_and_lastmodified_for_i18n():
+	locale = request.view_args["locale"]
+	domain = request.view_args["domain"]
+
+	etag_ok = util.flask.check_etag(_compute_etag_for_i18n(request.view_args["locale"], request.view_args["domain"]))
+
+	lastmodified = _compute_date_for_i18n(locale, domain)
+	lastmodified_ok = lastmodified is None or util.flask.check_lastmodified(lastmodified)
+
+	return etag_ok and lastmodified_ok
+
+
+def _get_all_templates():
+	from octoprint.util.jinja import get_all_template_paths
+	return get_all_template_paths(app.jinja_loader)
+
+
+def _get_all_assets():
+	from octoprint.util.jinja import get_all_asset_paths
+	return get_all_asset_paths(app.jinja_env.assets_environment)
+
+
+def _get_all_translationfiles(locale, domain):
+	from flask import _request_ctx_stack
+
+	def get_po_path(basedir, locale, domain):
+		path = os.path.join(basedir, locale)
+		if not os.path.isdir(path):
+			return None
+
+		path = os.path.join(path, "LC_MESSAGES", "{domain}.po".format(**locals()))
+		if not os.path.isfile(path):
+			return None
+
+		return path
+
+	po_files = []
+
+	user_base_path = os.path.join(settings().getBaseFolder("translations", check_writable=False))
+	user_plugin_path = os.path.join(user_base_path, "_plugins")
+
+	# plugin translations
+	plugins = octoprint.plugin.plugin_manager().enabled_plugins
+	for name, plugin in plugins.items():
+		dirs = [os.path.join(user_plugin_path, name), os.path.join(plugin.location, 'translations')]
+		for dirname in dirs:
+			if not os.path.isdir(dirname):
+				continue
+
+			po_file = get_po_path(dirname, locale, domain)
+			if po_file:
+				po_files.append(po_file)
+				break
+
+	# core translations
+	ctx = _request_ctx_stack.top
+	base_path = os.path.join(ctx.app.root_path, "translations")
+
+	dirs = [user_base_path, base_path]
+	for dirname in dirs:
+		po_file = get_po_path(dirname, locale, domain)
+		if po_file:
+			po_files.append(po_file)
+			break
+
+	return po_files
+
+
+def _get_translations(locale, domain):
+	from babel.messages.pofile import read_po
+	from octoprint.util import dict_merge
+
+	messages = dict()
+	plural_expr = None
+
+	def messages_from_po(path, locale, domain):
+		messages = dict()
+		with codecs.open(path, encoding="utf-8") as f:
+			catalog = read_po(f, locale=locale, domain=domain)
+
+			for message in catalog:
+				message_id = message.id
+				if isinstance(message_id, (list, tuple)):
+					message_id = message_id[0]
+				if message.string:
+					messages[message_id] = message.string
+
+		return messages, catalog.plural_expr
+
+	po_files = _get_all_translationfiles(locale, domain)
+	for po_file in po_files:
+		po_messages, plural_expr = messages_from_po(po_file, locale, domain)
+		if po_messages is not None:
+			messages = dict_merge(messages, po_messages)
+
+	return messages, plural_expr

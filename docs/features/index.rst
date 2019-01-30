@@ -4,6 +4,10 @@
 Features
 ********
 
+.. note::
+
+   This feature list is not exhaustive. This part of OctoPrint's documentation is sadly far from finished still.
+
 .. toctree::
    :maxdepth: 2
 
@@ -11,4 +15,6 @@ Features
    custom_controls.rst
    gcode_scripts.rst
    action_commands.rst
+   atcommands.rst
    plugins.rst
+   safemode.rst

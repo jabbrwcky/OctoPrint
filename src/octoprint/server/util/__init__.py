@@ -1,16 +1,24 @@
 # coding=utf-8
-from __future__ import absolute_import
+from __future__ import absolute_import, division, print_function
 
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = 'GNU Affero General Public License http://www.gnu.org/licenses/agpl.html'
 __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms of the AGPLv3 License"
+
+import base64
 
 from octoprint.settings import settings
 import octoprint.timelapse
 import octoprint.server
 from octoprint.users import ApiUser
 
+from octoprint.util import deprecated
+from octoprint.plugin import plugin_manager
+
 import flask as _flask
+import flask_login
+import flask_principal
+import logging
 
 from . import flask
 from . import sockjs
@@ -18,51 +26,93 @@ from . import tornado
 from . import watchdog
 
 
-def apiKeyRequestHandler():
+def enforceApiKeyRequestHandler():
 	"""
-	``before_request`` handler for blueprints for which all requests need to be made supplying an API key.
-
-	This may be the UI_API_KEY, in which case the underlying request processing will directly take place, or it may be
-	the global, an app specific or a user specific one. In any case it has to be present and must be valid, so anything
-	other than the above types will result in the application denying the request.
+	``before_request`` handler for blueprints which makes sure an API key is provided
 	"""
 
 	import octoprint.server
 
-	if _flask.request.method == 'OPTIONS' and settings().getBoolean(["api", "allowCrossOrigin"]):
-		return optionsAllowOrigin(_flask.request)
+	if _flask.request.method == 'OPTIONS':
+		# we ignore OPTIONS requests here
+		return
 
-	if _flask.request.endpoint == "static" or _flask.request.endpoint.endswith(".static"):
+	if _flask.request.endpoint and (_flask.request.endpoint == "static" or _flask.request.endpoint.endswith(".static")):
+		# no further handling for static resources
 		return
 
 	apikey = get_api_key(_flask.request)
-	if apikey is None:
-		# no api key => 401
-		return _flask.make_response("No API key provided", 401)
 
-	if apikey == octoprint.server.UI_API_KEY:
-		# ui api key => continue regular request processing
+	if not apikey:
+		return _flask.make_response("No API key provided", 403)
+
+	if apikey != octoprint.server.UI_API_KEY and not settings().getBoolean(["api", "enabled"]):
+		# api disabled => 403
+		return _flask.make_response("API disabled", 403)
+
+apiKeyRequestHandler = deprecated("apiKeyRequestHandler has been renamed to enforceApiKeyRequestHandler")(enforceApiKeyRequestHandler)
+
+
+def loginFromApiKeyRequestHandler():
+	"""
+	``before_request`` handler for blueprints which creates a login session for the provided api key (if available)
+
+	UI_API_KEY and app session keys are handled as anonymous keys here and ignored.
+	"""
+
+	apikey = get_api_key(_flask.request)
+
+	if not apikey:
 		return
 
-	if not settings().getBoolean(["api", "enabled"]):
-		# api disabled => 401
-		return _flask.make_response("API disabled", 401)
-
-	if apikey == settings().get(["api", "key"]):
-		# global api key => continue regular request processing
+	if apikey == octoprint.server.UI_API_KEY:
 		return
 
 	if octoprint.server.appSessionManager.validate(apikey):
-		# app session key => continue regular request processing
 		return
 
 	user = get_user_for_apikey(apikey)
-	if user is not None:
-		# user specific api key => continue regular request processing
-		return
+	if not loginUser(user):
+		return _flask.make_response("Invalid API key", 403)
 
-	# invalid api key => 401
-	return _flask.make_response("Invalid API key", 401)
+	_flask.g.login_via_apikey = True
+
+
+def loginFromAuthorizationHeaderRequestHandler():
+	"""
+	``before_request`` handler for creating login sessions based on the Authorization header.
+	"""
+
+	authorization_header = get_authorization_header(_flask.request)
+	user = get_user_for_authorization_header(authorization_header)
+	loginUser(user)
+
+
+def loginUser(user, remember=False):
+	"""
+	Logs the provided ``user`` into Flask Login and Principal if not None and active
+
+	Args:
+		user: the User to login. May be None in which case the login will fail
+		remember: Whether to set the ``remember`` flag on the Flask Login operation
+
+	Returns: (bool) True if the login succeeded, False otherwise
+
+	"""
+	if user is not None and user.is_active() and flask_login.login_user(user, remember=remember):
+		flask_principal.identity_changed.send(_flask.current_app._get_current_object(),
+		                                      identity=flask_principal.Identity(user.get_id()))
+		return True
+	return False
+
+
+def corsRequestHandler():
+	"""
+	``before_request`` handler for blueprints which sets CORS headers for OPTIONS requests if enabled
+	"""
+	if _flask.request.method == 'OPTIONS' and settings().getBoolean(["api", "allowCrossOrigin"]):
+		# reply to OPTIONS request for CORS headers
+		return optionsAllowOrigin(_flask.request)
 
 
 def corsResponseHandler(resp):
@@ -90,6 +140,20 @@ def noCachingResponseHandler(resp):
 	"""
 
 	return flask.add_non_caching_response_headers(resp)
+
+
+def noCachingExceptGetResponseHandler(resp):
+	"""
+	``after_request`` handler for blueprints which shall set no caching headers
+	on their responses to any requests that are not sent with method ``GET``.
+
+	See :func:`noCachingResponseHandler`.
+	"""
+
+	if _flask.request.method == "GET":
+		return flask.add_no_max_age_response_headers(resp)
+	else:
+		return flask.add_non_caching_response_headers(resp)
 
 
 def optionsAllowOrigin(request):
@@ -120,10 +184,52 @@ def get_user_for_apikey(apikey):
 		if apikey == settings().get(["api", "key"]) or octoprint.server.appSessionManager.validate(apikey):
 			# master key or an app session key was used
 			return ApiUser()
-		elif octoprint.server.userManager is not None:
-			# user key might have been used
-			return octoprint.server.userManager.findUser(apikey=apikey)
+
+		if octoprint.server.userManager.enabled:
+			user = octoprint.server.userManager.findUser(apikey=apikey)
+			if user is not None:
+				# user key was used
+				return user
+
+		apikey_hooks = plugin_manager().get_hooks("octoprint.accesscontrol.keyvalidator")
+		for name, hook in apikey_hooks.items():
+			try:
+				user = hook(apikey)
+				if user is not None:
+					return user
+			except:
+				logging.getLogger(__name__).exception("Error running api key validator for plugin {} and key {}".format(name, apikey))
 	return None
+
+
+def get_user_for_authorization_header(header):
+	if not settings().getBoolean(["accessControl", "trustBasicAuthentication"]):
+		return None
+
+	if header is None:
+		return None
+
+	if not header.startswith("Basic "):
+		# we currently only support Basic Authentication
+		return None
+
+	header = header.replace('Basic ', '', 1)
+	try:
+		header = base64.b64decode(header)
+	except TypeError:
+		return None
+
+	name, password = header.split(':', 1)
+	if not octoprint.server.userManager.enabled:
+		return None
+
+	user = octoprint.server.userManager.findUser(userid=name)
+	if settings().getBoolean(["accessControl", "checkBasicAuthenticationPassword"]) \
+			and not octoprint.server.userManager.checkPassword(name, password):
+		# password check enabled and password don't match
+		return None
+
+	return user
 
 
 def get_api_key(request):
@@ -143,90 +249,20 @@ def get_api_key(request):
 	return None
 
 
-#~~ reverse proxy compatible WSGI middleware
+def get_authorization_header(request):
+	# Tornado and Flask headers
+	return request.headers.get("Authorization")
 
 
-class ReverseProxied(object):
-	"""
-	Wrap the application in this middleware and configure the
-	front-end server to add these headers, to let you quietly bind
-	this to a URL other than / and to an HTTP scheme that is
-	different than what is used locally.
+def get_plugin_hash():
+	from octoprint.plugin import plugin_manager
 
-	In nginx:
+	plugin_signature = lambda impl: "{}:{}".format(impl._identifier, impl._plugin_version)
+	template_plugins = map(plugin_signature, plugin_manager().get_implementations(octoprint.plugin.TemplatePlugin))
+	asset_plugins = map(plugin_signature, plugin_manager().get_implementations(octoprint.plugin.AssetPlugin))
+	ui_plugins = sorted(set(template_plugins + asset_plugins))
 
-	.. code-block:: none
-
-	   location /myprefix {
-	       proxy_pass http://192.168.0.1:5001;
-	       proxy_set_header Host $host;
-	       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-	       proxy_set_header X-Scheme $scheme;
-	       proxy_set_header X-Script-Name /myprefix;
-	   }
-
-	Alternatively define prefix and scheme via config.yaml:
-
-	.. code-block:: yaml
-
-	   server:
-	     baseUrl: /myprefix
-	     scheme: http
-
-	:param app: the WSGI application
-	:param header_script_name: the HTTP header in the wsgi environment from which to determine the prefix
-	:param header_scheme: the HTTP header in the wsgi environment from which to determine the scheme
-	:param header_host: the HTTP header in the wsgi environment from which to determine the host for which to generate external URLs
-	:param base_url: the prefix to use as fallback if headers are not set
-	:param scheme: the scheme to use as fallback if headers are not set
-	:param host: the host to use as fallback if headers are not set
-	"""
-
-	def __init__(self, app, header_prefix="x-script-name", header_scheme="x-scheme", header_host="x-forwarded-host", base_url="", scheme="", host=""):
-		self.app = app
-
-		# headers for prefix & scheme & host, converted to conform to WSGI format
-		to_wsgi_format = lambda header: "HTTP_" + header.upper().replace("-", "_")
-		self._header_prefix = to_wsgi_format(header_prefix)
-		self._header_scheme = to_wsgi_format(header_scheme)
-		self._header_host = to_wsgi_format(header_host)
-
-		# fallback prefix & scheme & host from config
-		self._fallback_prefix = base_url
-		self._fallback_scheme = scheme
-		self._fallback_host = host
-
-	def __call__(self, environ, start_response):
-		# determine prefix
-		prefix = environ.get(self._header_prefix, "")
-		if not prefix:
-			prefix = self._fallback_prefix
-
-		# rewrite SCRIPT_NAME and if necessary also PATH_INFO based on prefix
-		if prefix:
-			environ["SCRIPT_NAME"] = prefix
-			path_info = environ["PATH_INFO"]
-			if path_info.startswith(prefix):
-				environ["PATH_INFO"] = path_info[len(prefix):]
-
-		# determine scheme
-		scheme = environ.get(self._header_scheme, "")
-		if not scheme:
-			scheme = self._fallback_scheme
-
-		# rewrite wsgi.url_scheme based on scheme
-		if scheme:
-			environ["wsgi.url_scheme"] = scheme
-
-		# determine host
-		host = environ.get(self._header_host, "")
-		if not host:
-			host = self._fallback_host
-
-		# rewrite host header based on host
-		if host:
-			environ["HTTP_HOST"] = host
-
-		# call wrapped app with rewritten environment
-		return self.app(environ, start_response)
-
+	import hashlib
+	plugin_hash = hashlib.sha1()
+	plugin_hash.update(",".join(ui_plugins))
+	return plugin_hash.hexdigest()

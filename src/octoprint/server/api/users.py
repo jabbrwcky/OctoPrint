@@ -1,5 +1,5 @@
 # coding=utf-8
-from __future__ import absolute_import
+from __future__ import absolute_import, division, print_function
 
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = 'GNU Affero General Public License http://www.gnu.org/licenses/agpl.html'
@@ -7,12 +7,12 @@ __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms
 
 from flask import request, jsonify, abort, make_response
 from werkzeug.exceptions import BadRequest
-from flask.ext.login import current_user
+from flask_login import current_user
 
 import octoprint.users as users
 
 from octoprint.server import SUCCESS, admin_permission, userManager
-from octoprint.server.api import api
+from octoprint.server.api import api, valid_boolean_trues
 from octoprint.server.util.flask import restricted_access
 
 
@@ -23,7 +23,7 @@ from octoprint.server.util.flask import restricted_access
 @restricted_access
 @admin_permission.require(403)
 def getUsers():
-	if userManager is None:
+	if not userManager.enabled:
 		return jsonify(SUCCESS)
 
 	return jsonify({"users": userManager.getAllUsers()})
@@ -33,7 +33,7 @@ def getUsers():
 @restricted_access
 @admin_permission.require(403)
 def addUser():
-	if userManager is None:
+	if not userManager.enabled:
 		return jsonify(SUCCESS)
 
 	if not "application/json" in request.headers["Content-Type"]:
@@ -44,12 +44,19 @@ def addUser():
 	except BadRequest:
 		return make_response("Malformed JSON body in request", 400)
 
+	if not "name" in data:
+		return make_response("Missing mandatory name field", 400)
+	if not "password" in data:
+		return make_response("Missing mandatory password field", 400)
+	if not "active" in data:
+		return make_response("Missing mandatory active field", 400)
+
 	name = data["name"]
 	password = data["password"]
-	active = data["active"]
+	active = data["active"] in valid_boolean_trues
 
 	roles = ["user"]
-	if "admin" in data.keys() and data["admin"]:
+	if "admin" in data and data["admin"] in valid_boolean_trues:
 		roles.append("admin")
 
 	try:
@@ -62,7 +69,7 @@ def addUser():
 @api.route("/users/<username>", methods=["GET"])
 @restricted_access
 def getUser(username):
-	if userManager is None:
+	if not userManager.enabled:
 		return jsonify(SUCCESS)
 
 	if current_user is not None and not current_user.is_anonymous() and (current_user.get_name() == username or current_user.is_admin()):
@@ -79,7 +86,7 @@ def getUser(username):
 @restricted_access
 @admin_permission.require(403)
 def updateUser(username):
-	if userManager is None:
+	if not userManager.enabled:
 		return jsonify(SUCCESS)
 
 	user = userManager.findUser(username)
@@ -94,13 +101,13 @@ def updateUser(username):
 
 		# change roles
 		roles = ["user"]
-		if "admin" in data.keys() and data["admin"]:
+		if "admin" in data and data["admin"] in valid_boolean_trues:
 			roles.append("admin")
 		userManager.changeUserRoles(username, roles)
 
 		# change activation
-		if "active" in data.keys():
-			userManager.changeUserActivation(username, data["active"])
+		if "active" in data:
+			userManager.changeUserActivation(username, data["active"] in valid_boolean_trues)
 		return getUsers()
 	else:
 		abort(404)
@@ -110,7 +117,7 @@ def updateUser(username):
 @restricted_access
 @admin_permission.require(http_exception=403)
 def removeUser(username):
-	if userManager is None:
+	if not userManager.enabled:
 		return jsonify(SUCCESS)
 
 	try:
@@ -123,7 +130,7 @@ def removeUser(username):
 @api.route("/users/<username>/password", methods=["PUT"])
 @restricted_access
 def changePasswordForUser(username):
-	if userManager is None:
+	if not userManager.enabled:
 		return jsonify(SUCCESS)
 
 	if current_user is not None and not current_user.is_anonymous() and (current_user.get_name() == username or current_user.is_admin()):
@@ -135,7 +142,7 @@ def changePasswordForUser(username):
 		except BadRequest:
 			return make_response("Malformed JSON body in request", 400)
 
-		if not "password" in data.keys() or not data["password"]:
+		if not "password" in data or not data["password"]:
 			return make_response("password is missing from request", 400)
 
 		try:
@@ -151,7 +158,7 @@ def changePasswordForUser(username):
 @api.route("/users/<username>/settings", methods=["GET"])
 @restricted_access
 def getSettingsForUser(username):
-	if userManager is None:
+	if not userManager.enabled:
 		return jsonify(SUCCESS)
 
 	if current_user is None or current_user.is_anonymous() or (current_user.get_name() != username and not current_user.is_admin()):
@@ -165,7 +172,7 @@ def getSettingsForUser(username):
 @api.route("/users/<username>/settings", methods=["PATCH"])
 @restricted_access
 def changeSettingsForUser(username):
-	if userManager is None:
+	if not userManager.enabled:
 		return jsonify(SUCCESS)
 
 	if current_user is None or current_user.is_anonymous() or (current_user.get_name() != username and not current_user.is_admin()):
@@ -185,7 +192,7 @@ def changeSettingsForUser(username):
 @api.route("/users/<username>/apikey", methods=["DELETE"])
 @restricted_access
 def deleteApikeyForUser(username):
-	if userManager is None:
+	if not userManager.enabled:
 		return jsonify(SUCCESS)
 
 	if current_user is not None and not current_user.is_anonymous() and (current_user.get_name() == username or current_user.is_admin()):
@@ -201,7 +208,7 @@ def deleteApikeyForUser(username):
 @api.route("/users/<username>/apikey", methods=["POST"])
 @restricted_access
 def generateApikeyForUser(username):
-	if userManager is None:
+	if not userManager.enabled:
 		return jsonify(SUCCESS)
 
 	if current_user is not None and not current_user.is_anonymous() and (current_user.get_name() == username or current_user.is_admin()):

@@ -23,6 +23,9 @@ $(function() {
         self.extrusionAmount = ko.observable(undefined);
         self.controls = ko.observableArray([]);
 
+        self.distances = ko.observableArray([0.1, 1, 10, 100]);
+        self.distance = ko.observable(10);
+
         self.tools = ko.observableArray([]);
 
         self.feedRate = ko.observable(100);
@@ -34,14 +37,24 @@ $(function() {
         self.additionalControls = [];
 
         self.webcamDisableTimeout = undefined;
+        self.webcamLoaded = ko.observable(false);
+        self.webcamError = ko.observable(false);
 
         self.keycontrolActive = ko.observable(false);
         self.keycontrolHelpActive = ko.observable(false);
-        self.keycontrolPossible = ko.computed(function () {
-            return self.isOperational() && !self.isPrinting() && self.loginState.isUser() && !$.browser.mobile;
+        self.keycontrolPossible = ko.pureComputed(function () {
+            return self.settings.feature_keyboardControl() && self.isOperational() && !self.isPrinting() && self.loginState.isUser() && !$.browser.mobile;
         });
-        self.showKeycontrols = ko.computed(function () {
+        self.showKeycontrols = ko.pureComputed(function () {
             return self.keycontrolActive() && self.keycontrolPossible();
+        });
+
+        self.webcamRatioClass = ko.pureComputed(function() {
+            if (self.settings.webcam_streamRatio() == "4:3") {
+                return "ratio43";
+            } else {
+                return "ratio169";
+            }
         });
 
         self.settings.printerProfiles.currentProfileData.subscribe(function () {
@@ -88,6 +101,8 @@ $(function() {
         };
 
         self.onEventSettingsUpdated = function (payload) {
+            // the webcam url might have changed, make sure we replace it now if the tab is focused
+            self._enableWebcam();
             self.requestData();
         };
 
@@ -211,6 +226,10 @@ $(function() {
                 }
             }
 
+            if (!control.hasOwnProperty("additionalClasses")) {
+                control.additionalClasses = "";
+            }
+
             control.processed = true;
             return control;
         };
@@ -245,7 +264,7 @@ $(function() {
 
         self.sendJogCommand = function (axis, multiplier, distance) {
             if (typeof distance === "undefined")
-                distance = $('#jog_distance button.active').data('distance');
+                distance = self.distance();
             if (self.settings.printerProfiles.currentProfileData() && self.settings.printerProfiles.currentProfileData()["axes"] && self.settings.printerProfiles.currentProfileData()["axes"][axis] && self.settings.printerProfiles.currentProfileData()["axes"][axis]["inverted"]()) {
                 multiplier *= -1;
             }
@@ -338,50 +357,81 @@ $(function() {
             self.requestData();
         };
 
-        self.updateRotatorWidth = function() {
+        self._disableWebcam = function() {
+            // only disable webcam stream if tab is out of focus for more than 5s, otherwise we might cause
+            // more load by the constant connection creation than by the actual webcam stream
+
+            // safari bug doesn't release the mjpeg stream, so we just disable this for safari.
+            if (OctoPrint.coreui.browser.safari) {
+                return;
+            }
+
+            var timeout = self.settings.webcam_streamTimeout() || 5;
+            self.webcamDisableTimeout = setTimeout(function () {
+                log.debug("Unloading webcam stream");
+                $("#webcam_image").attr("src", "");
+                self.webcamLoaded(false);
+            }, timeout * 1000);
+        };
+
+        self._enableWebcam = function() {
+            if (OctoPrint.coreui.selectedTab != "#control" || !OctoPrint.coreui.browserTabVisible) {
+                return;
+            }
+
+            if (self.webcamDisableTimeout != undefined) {
+                clearTimeout(self.webcamDisableTimeout);
+            }
             var webcamImage = $("#webcam_image");
-            if (self.settings.webcam_rotate90()) {
-                if (webcamImage.width() > 0) {
-                    $("#webcam_rotator").css("height", webcamImage.width());
+            var currentSrc = webcamImage.attr("src");
+
+            // safari bug doesn't release the mjpeg stream, so we just set it up the once
+            if (OctoPrint.coreui.browser.safari && currentSrc != undefined) {
+                return;
+            }
+
+            var newSrc = self.settings.webcam_streamUrl();
+            if (currentSrc != newSrc) {
+                if (newSrc.lastIndexOf("?") > -1) {
+                    newSrc += "&";
                 } else {
-                    webcamImage.off("load.rotator");
-                    webcamImage.on("load.rotator", function() {
-                        $("#webcam_rotator").css("height", webcamImage.width());
-                        webcamImage.off("load.rotator");
-                    });
+                    newSrc += "?";
                 }
-            } else {
-                $("#webcam_rotator").css("height", "");
+                newSrc += new Date().getTime();
+
+                self.webcamLoaded(false);
+                self.webcamError(false);
+                webcamImage.attr("src", newSrc);
             }
         };
 
-        self.onSettingsBeforeSave = self.updateRotatorWidth;
+        self.onWebcamLoaded = function() {
+            if (self.webcamLoaded()) return;
+
+            log.debug("Webcam stream loaded");
+            self.webcamLoaded(true);
+            self.webcamError(false);
+        };
+
+        self.onWebcamErrored = function() {
+            log.debug("Webcam stream failed to load/disabled");
+            self.webcamLoaded(false);
+            self.webcamError(true);
+        };
 
         self.onTabChange = function (current, previous) {
             if (current == "#control") {
-                if (self.webcamDisableTimeout != undefined) {
-                    clearTimeout(self.webcamDisableTimeout);
-                }
-                var webcamImage = $("#webcam_image");
-                var currentSrc = webcamImage.attr("src");
-                if (currentSrc === undefined || currentSrc.trim() == "") {
-                    var newSrc = CONFIG_WEBCAM_STREAM;
-                    if (CONFIG_WEBCAM_STREAM.lastIndexOf("?") > -1) {
-                        newSrc += "&";
-                    } else {
-                        newSrc += "?";
-                    }
-                    newSrc += new Date().getTime();
-
-                    self.updateRotatorWidth();
-                    webcamImage.attr("src", newSrc);
-                }
+                self._enableWebcam();
             } else if (previous == "#control") {
-                // only disable webcam stream if tab is out of focus for more than 5s, otherwise we might cause
-                // more load by the constant connection creation than by the actual webcam stream
-                self.webcamDisableTimeout = setTimeout(function () {
-                    $("#webcam_image").attr("src", "");
-                }, 5000);
+                self._disableWebcam();
+            }
+        };
+
+        self.onBrowserTabVisibilityChange = function(status) {
+            if (status) {
+                self._enableWebcam();
+            } else {
+                self._disableWebcam();
             }
         };
 
@@ -394,6 +444,7 @@ $(function() {
                 self.additionalControls = additionalControls;
                 self.rerenderControls();
             }
+            self._enableWebcam();
         };
 
         self.onFocus = function (data, event) {
@@ -501,11 +552,15 @@ $(function() {
             }
         };
 
+        self.stripDistanceDecimal = function(distance) {
+            return distance.toString().replace(".", "");
+        };
+
     }
 
-    OCTOPRINT_VIEWMODELS.push([
-        ControlViewModel,
-        ["loginStateViewModel", "settingsViewModel"],
-        "#control"
-    ]);
+    OCTOPRINT_VIEWMODELS.push({
+        construct: ControlViewModel,
+        dependencies: ["loginStateViewModel", "settingsViewModel"],
+        elements: ["#control"]
+    });
 });

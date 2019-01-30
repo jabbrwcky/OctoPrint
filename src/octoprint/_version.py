@@ -9,6 +9,7 @@
 # versioneer-0.15+dev (https://github.com/warner/python-versioneer)
 
 """Git implementation of _version.py."""
+from __future__ import absolute_import, division, print_function
 
 import errno
 import os
@@ -304,7 +305,6 @@ def git_parse_lookup_file(path):
     if not os.path.exists(path):
         return []
 
-    import re
     lookup = []
     with open(path, "r") as f:
         for line in f:

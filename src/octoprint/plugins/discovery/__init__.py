@@ -1,5 +1,5 @@
 # coding=utf-8
-from __future__ import absolute_import
+from __future__ import absolute_import, division, print_function
 
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = 'GNU Affero General Public License http://www.gnu.org/licenses/agpl.html'
@@ -10,8 +10,11 @@ The SSDP/UPNP implementations has been largely inspired by https://gist.github.c
 """
 
 import logging
-import os
 import flask
+from flask_babel import gettext
+
+# noinspection PyCompatibility
+from builtins import range
 
 import octoprint.plugin
 import octoprint.util
@@ -21,12 +24,6 @@ try:
 except:
 	pybonjour = False
 
-
-__plugin_name__ = "Discovery"
-__plugin_author__ = "Gina Häußge"
-__plugin_url__ = "https://github.com/foosel/OctoPrint/wiki/Plugin:-Discovery"
-__plugin_description__ = "Makes the OctoPrint instance discoverable via Bonjour/Avahi/Zeroconf and uPnP"
-__plugin_license__ = "AGPLv3"
 
 def __plugin_load__():
 	if not pybonjour:
@@ -58,6 +55,7 @@ class DiscoveryPlugin(octoprint.plugin.StartupPlugin,
 
 	ssdp_multicast_port = 1900
 
+	# noinspection PyMissingConstructor
 	def __init__(self):
 		self.host = None
 		self.port = None
@@ -196,8 +194,20 @@ class DiscoveryPlugin(octoprint.plugin.StartupPlugin,
 			params["txtRecord"] = pybonjour.TXTRecord(txt_record)
 
 		key = (reg_type, port)
-		self._sd_refs[key] = pybonjour.DNSServiceRegister(**params)
-		self._logger.info(u"Registered {name} for {reg_type}".format(**locals()))
+
+		counter = 1
+		while True:
+			try:
+				self._sd_refs[key] = pybonjour.DNSServiceRegister(**params)
+				self._logger.info(u"Registered '{name}' for {regtype}".format(**params))
+				return True
+			except pybonjour.BonjourError as be:
+				if be.errorCode == pybonjour.kDNSServiceErr_NameConflict:
+					# Name already registered by different service, let's try a counter postfix. See #2852
+					counter += 1
+					params["name"] = u"{} ({})".format(name, counter)
+				else:
+					raise
 
 	def zeroconf_unregister(self, reg_type, port=None):
 		"""
@@ -409,7 +419,7 @@ class DiscoveryPlugin(octoprint.plugin.StartupPlugin,
 				"HOST: {mcast_addr}:{mcast_port}\r\n\r\n"
 			])
 
-			for _ in xrange(retries):
+			for _ in range(retries):
 				for addr in octoprint.util.interface_addresses():
 					try:
 						sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -420,7 +430,7 @@ class DiscoveryPlugin(octoprint.plugin.StartupPlugin,
 						message = search_message.format(query=query,
 						                                mcast_addr=self.__class__.ssdp_multicast_addr,
 						                                mcast_port=self.__class__.ssdp_multicast_port)
-						for _ in xrange(2):
+						for _ in range(2):
 							sock.sendto(message, (self.__class__.ssdp_multicast_addr, self.__class__.ssdp_multicast_port))
 
 						try:
@@ -541,7 +551,7 @@ class DiscoveryPlugin(octoprint.plugin.StartupPlugin,
 
 		self._ssdp_monitor_active = False
 		if self.host and self.port:
-			for _ in xrange(2):
+			for _ in range(2):
 				self._ssdp_notify(alive=False)
 
 	def _ssdp_notify(self, alive=True):
@@ -587,7 +597,7 @@ class DiscoveryPlugin(octoprint.plugin.StartupPlugin,
 				                                nts="ssdp:alive" if alive else "ssdp:byebye",
 				                                mcast_addr=self.__class__.ssdp_multicast_addr,
 				                                mcast_port=self.__class__.ssdp_multicast_port)
-				for _ in xrange(2):
+				for _ in range(2):
 					# send twice, stuff might get lost, it's only UDP
 					sock.sendto(message, (self.__class__.ssdp_multicast_addr, self.__class__.ssdp_multicast_port))
 			except:
@@ -603,8 +613,14 @@ class DiscoveryPlugin(octoprint.plugin.StartupPlugin,
 		                alive message
 		"""
 
-		from BaseHTTPServer import BaseHTTPRequestHandler
-		from StringIO import StringIO
+		try:
+			# noinspection PyCompatibility
+			from http.server import BaseHTTPRequestHandler
+		except ImportError:
+			# noinspection PyCompatibility
+			from BaseHTTPServer import BaseHTTPRequestHandler
+
+		from io import BytesIO
 		import socket
 
 		socket.setdefaulttimeout(timeout)
@@ -619,8 +635,9 @@ class DiscoveryPlugin(octoprint.plugin.StartupPlugin,
 
 		class Request(BaseHTTPRequestHandler):
 
+			# noinspection PyMissingConstructor
 			def __init__(self, request_text):
-				self.rfile = StringIO(request_text)
+				self.rfile = BytesIO(request_text)
 				self.raw_requestline = self.rfile.readline()
 				self.error_code = self.error_message = None
 				self.parse_request()
@@ -681,3 +698,12 @@ class DiscoveryPlugin(octoprint.plugin.StartupPlugin,
 		else:
 			import socket
 			return u"OctoPrint instance on {}".format(socket.gethostname())
+
+
+__plugin_name__ = "Discovery"
+__plugin_author__ = "Gina Häußge"
+__plugin_url__ = "http://docs.octoprint.org/en/master/bundledplugins/discovery.html"
+__plugin_description__ = "Makes the OctoPrint instance discoverable via Bonjour/Avahi/Zeroconf and uPnP"
+__plugin_disabling_discouraged__ = gettext("Without this plugin your OctoPrint instance will no longer be "
+                                           "discoverable on the network via Bonjour and uPnP.")
+__plugin_license__ = "AGPLv3"

@@ -1,6 +1,6 @@
 .. _sec-plugins-gettingstarted:
 
-Getting Started
+Plugin Tutorial
 ===============
 
 .. contents::
@@ -20,7 +20,7 @@ development environment::
   $ virtualenv venv
   [...]
   $ source venv/bin/activate
-  (venv) $ pip install -e[develop]
+  (venv) $ pip install -e .[develop,plugins]
   [...]
   (venv) $ octoprint --help
   Usage: octoprint [OPTIONS] COMMAND [ARGS]...
@@ -41,7 +41,15 @@ development environment::
 
       [...]
 
-We'll start at the most basic form a plugin can take - just a couple of simple lines of Python code:
+.. important::
+
+   This tutorial assumes you are running OctoPrint 1.3.0 and up. Please make sure your version of
+   OctoPrint is up to date before proceeding. If you did a fresh checkout, that should already
+   be the case but if not you might have to update first. You can check your version of OctoPrint
+   by running ``octoprint --version`` or by taking a look into the lower left corner in OctoPrint's
+   web interface.
+
+We'll start at the most basic form a plugin can take - just a few simple lines of Python code:
 
 .. code-block:: python
    :linenos:
@@ -108,7 +116,7 @@ used :func:`~octoprint.plugin.StartupPlugin.on_startup` instead, in which case o
 up and ready to serve requests.
 
 You'll also note that we are using ``self._logger`` for logging. Where did that one come from? OctoPrint's plugin system
-injects :ref:`a couple of useful objects <sec-plugins-concepts-injectedproperties>` into our plugin implementation classes,
+injects :ref:`a some useful objects <sec-plugins-mixins-injectedproperties>` into our plugin implementation classes,
 one of those being a fully instantiated `python logger <https://docs.python.org/2/library/logging.html>`_ ready to be
 used by your plugin. As you can see in the log output above, that logger uses the namespace ``octoprint.plugins.helloworld``
 for our little plugin here, or more generally ``octoprint.plugins.<plugin identifier>``.
@@ -126,14 +134,15 @@ as a simple python file following the naming convention ``<plugin identifier>.py
 ``~/.octoprint/plugins`` folder. You already know how that works. But let's say you have more than just a simple plugin
 that can be done in one file. Distributing multiple files and getting your users to install them in the right way
 so that OctoPrint will be able to actually find and load them is certainly not impossible, but we want to do it in the
-best way possible, meaning we want to make our plugin a fully installable python module that your users will be able to
+best way possible, meaning we want to make our plugin a fully installable Python module that your users will be able to
 install directly via `OctoPrint's built-in Plugin Manager <https://github.com/foosel/OctoPrint/wiki/Plugin:-Plugin-Manager>`_
 or alternatively manually utilizing Python's standard package manager ``pip`` directly.
 
-So let's begin. We'll use the `cookiecutter <https://github.com/audreyr/cookiecutter>`_ template for OctoPrint plugins here,
-so we'll first need to install that::
+So let's begin. We'll use the `cookiecutter <https://github.com/audreyr/cookiecutter>`_ template for OctoPrint plugins
+here. This should already be installed if you used the ``plugins`` extra while installing OctoPrint.  However,
+you may install it with::
 
-   (venv) $ pip install cookiecutter
+   (venv) $ pip install "cookiecutter>=1.4,<1.7"
 
 Then we can use the ``octoprint dev plugin:new`` command [#f1]_ to generate a new OctoPrint plugin skeleton for us::
 
@@ -273,7 +282,7 @@ of information now defined twice:
    plugin_version = "1.0.0"
    plugin_description = "A quick \"Hello World\" example plugin for OctoPrint"
 
-The nice thing about our plugin now being a proper python package is that OctoPrint can and will access the metadata defined
+The nice thing about our plugin now being a proper Python package is that OctoPrint can and will access the metadata defined
 within ``setup.py``! So, we don't really need to define all this data twice. Remove ``__plugin_name__``, ``__plugin_version__``
 and ``__plugin_description__`` from ``__init__.py``:
 
@@ -326,7 +335,7 @@ Restart OctoPrint again::
    [...]
 
 Much better! You can override pretty much all of the metadata defined within ``setup.py`` from within your Plugin itself --
-take a look at :ref:`the available control properties <sec-plugin-concepts-controlproperties>` for all available
+take a look at :ref:`the available control properties <sec-plugins-controlproperties>` for all available
 overrides.
 
 Following the README of the `Plugin Skeleton <https://github.com/OctoPrint/OctoPrint-PluginSkeleton>`_ you could now
@@ -401,8 +410,8 @@ Now look at that!
 Settings Galore: How to make parts of your plugin user adjustable
 -----------------------------------------------------------------
 
-Remember that Wikipedia link we added to our little link in the navigation bar? It links to the english Wikipedia. But
-what if we want to allow our users to adjust that according to their wishes, e.g. to link to the german language node
+Remember that Wikipedia link we added to our little link in the navigation bar? It links to the English Wikipedia. But
+what if we want to allow our users to adjust that according to their wishes, e.g. to link to the German language node
 about "Hello World" programs instead?
 
 To allow your users to customized the behaviour of your plugin you'll need to implement the :class:`~octoprint.plugin.SettingsPlugin`
@@ -482,7 +491,7 @@ Also adjust your plugin's ``templates/helloworld_navbar.jinja2`` like this:
 
 OctoPrint injects the template variables that your plugin defines prefixed with ``plugin_<plugin identifier>_`` into
 the template renderer, so your ``url`` got turned into ``plugin_helloworld_url`` which you can now use as a simple
-`Jinja2 Variable <http://jinja.pocoo.org/docs/dev/templates/#variables>`_ in your plugin's template.
+`Jinja2 Variable <http://jinja.octoprint.org/templates.html#variables>`_ in your plugin's template.
 
 Restart OctoPrint and shift-reload the page in your browser (to make sure you really get a fresh copy). The link should
 still work and point to the URL we defined as default.
@@ -500,7 +509,7 @@ section doesn't yet exist in the file, create it):
    # [...]
 
 Restart OctoPrint. Not only should the URL displayed in the log file have changed, but also the link should now (after
-a proper shift-reload) point to the german Wikipedia node about "Hello World" programs::
+a proper shift-reload) point to the German Wikipedia node about "Hello World" programs::
 
    2015-01-30 11:47:18,634 - octoprint.plugins.helloworld - INFO - Hello World! (more: https://de.wikipedia.org/wiki/Hallo-Welt-Programm)
 
@@ -811,12 +820,10 @@ Put something like the following into ``helloworld.css``:
 .. code-block:: css
    :linenos:
 
-   #tab_plugin_helloworld {
-     iframe {
-       width: 100%;
-       height: 600px;
-       border: 1px solid #808080;
-     }
+   #tab_plugin_helloworld iframe {
+     width: 100%;
+     height: 600px;
+     border: 1px solid #808080;
    }
 
 Don't forget to remove the ``style`` attribute from the ``iframe`` tag in ``helloworld_tab.jinja2``:
@@ -1030,7 +1037,7 @@ stop it from doing that at the start of this section, we should switch this back
      stylesheet: css
    # [...]
 
-Just out of curiousity, restart, shift-reload and take a final look at the ``head``:
+Just out of curiosity, restart, shift-reload and take a final look at the ``head``:
 
 .. code-block:: html
    :linenos:
@@ -1052,7 +1059,7 @@ Way more compact, isn't it?
    CSS files instead of any non-existing LESS files. So you don't really *have* to use LESS if you don't want, but
    as soon as you need it just switch over.
 
-   The same thing works the other way around too btw. If your plugin only provides LESS files, OctoPrint will link to
+   The same thing works the other way around too by the way. If your plugin only provides LESS files, OctoPrint will link to
    those, lessjs will take care of the compilation. Please keep in mind though that also providing CSS files is the
    cleaner way.
 
@@ -1070,8 +1077,14 @@ For some insight on how to create plugins that react to various events within Oc
 add support for a slicer, OctoPrint's own bundled `CuraEngine plugin <https://github.com/foosel/OctoPrint/wiki/Plugin:-Cura>`_
 might give some hints. For extending OctoPrint's interface, the `NavbarTemp plugin <https://github.com/imrahil/OctoPrint-NavbarTemp>`_
 might show what's possible with a few lines of code already. Finally, just take a look at the
-`list of available plugins <https://github.com/foosel/OctoPrint/wiki#plugins>`_ on the OctoPrint wiki if you are
-looking for examples.
+`official Plugin Repository <http://plugins.octoprint.org>`_ if you are looking for examples.
+
+.. seealso::
+
+   `Jinja Template Designer Documentation <http://jinja.octoprint.org/templates.html>`_
+      Jinja's Template Designer Documentation describes the syntax and semantics of the template language used
+      by OctoPrint's frontend. Linked here are the docs for Jinja 2.8.1, which OctoPrint still
+      relies on for backwards compatibility reasons [#f3]_.
 
 .. rubric:: Footnotes
 
@@ -1084,3 +1097,7 @@ looking for examples.
 .. [#f2] Refer to the `LESS documentation <http://lesscss.org/#using-less>`_ on how to do that. If you are developing
          your plugin under Windows you might also want to give `WinLESS <http://winless.org/>`_ a look which will run
          in the background and keep your CSS files up to date with your various project's LESS files automatically.
+.. [#f3] Please always consult the Jinja documentation at `jinja.octoprint.org <http://jinja.octoprint.org>`_ instead of
+         the current stable documentation available at Jinja's project page. The reason for that is that for backwards
+         compatibility reasons OctoPrint currently sadly has to rely on an older version of Jinja. The documentation
+         available at `jinja.octoprint.org <http://jinja.octoprint.org>`_ matches that older version.

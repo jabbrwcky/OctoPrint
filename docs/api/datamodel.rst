@@ -31,7 +31,7 @@ Printer State
    * - ``flags``
      - 1
      - Printer state flags
-     - A couple of boolean printer state flags
+     - A few boolean printer state flags
    * - ``flags.operational``
      - 1
      - Boolean
@@ -44,6 +44,14 @@ Printer State
      - 1
      - Boolean
      - ``true`` if the printer is currently printing, ``false`` otherwise
+   * - ``flags.pausing``
+     - 1
+     - Boolean
+     - ``true`` if the printer is currently printing and in the process of pausing, ``false`` otherwise
+   * - ``flags.cancelling``
+     - 1
+     - Boolean
+     - ``true`` if the printer is currently printing and in the process of pausing, ``false`` otherwise
    * - ``flags.sdReady``
      - 1
      - Boolean
@@ -216,10 +224,6 @@ Progress information
 File related
 ============
 
-.. todo::
-
-   Update to reflect enhanced data now available.
-
 .. _sec-api-datamodel-files-file:
 
 File information
@@ -236,15 +240,34 @@ File information
    * - ``name``
      - 1
      - String
-     - The name of the file
+     - The name of the file without path. E.g. "file.gco" for a file "file.gco" located anywhere in the file system. Currently
+       this will always fit into ASCII.
+   * - ``display``
+     - 1
+     - String
+     - The name of the file without the path, this time potentially with non-ASCII unicode characters.
+       E.g. "a turtle 🐢.gco" for a file "a_turtle_turtle.gco" located anywhere in the file system.
+   * - ``path``
+     - 1
+     - String
+     - The path to the file within the location. E.g. "folder/subfolder/file.gco" for a file "file.gco" located within
+       "folder" and "subfolder" relative to the root of the location. Currently this will always fit into ASCII.
    * - ``type``
      - 1
      - String
      - Type of file. ``model`` or ``machinecode``. Or ``folder`` if it's a folder, in which case the ``children``
        node will be populated
+   * - ``typePath``
+     - 1
+     - list
+     - Path to type of file in extension tree. E.g. ``["model", "stl"]`` for ``.stl`` files, or ``["machinecode", "gcode"]``
+       for ``.gcode`` files. ``["folder"]`` for folders.
 
-Additional properties depend on ``type``. For a ``type`` value of ``folder``, see "Folders". For any other value
-see "Files".
+Additional properties depend on ``type``.
+For a ``type`` value of ``folder``, see :ref:`Folders <sec-api-datamodel-files-folders>`.
+For any other value see :ref:`Files <sec-api-datamodel-files-files>`.
+
+.. _sec-api-datamodel-files-folders:
 
 Folders
 '''''''
@@ -260,7 +283,14 @@ Folders
    * - ``children``
      - 0..*
      - Array of :ref:`File information items <sec-api-datamodel-files-file>`
-     - Contained children for entries of type ``folder``
+     - Contained children for entries of type ``folder``. On non recursive listings only present on first level
+       sub folders!
+   * - ``size``
+     - 0..1
+     - Number
+     - The size of all files contained in the folder and its subfolders. Not present in non recursive listings!
+
+.. _sec-api-datamodel-files-files:
 
 Files
 '''''
@@ -274,9 +304,9 @@ Files
      - Type
      - Description
    * - ``hash``
-     - 1
+     - 0..1
      - String
-     - MD5 hash of the file
+     - MD5 hash of the file. Only available for ``local`` files.
    * - ``size``
      - 0..1
      - Number
@@ -300,6 +330,44 @@ Files
      - :ref:`GCODE analysis information <sec-api-datamodel-files-gcodeanalysis>`
      - Information from the analysis of the GCODE file, if available. Left out in abridged version.
 
+.. _sec-api-datamodel-files-fileabridged:
+
+Abridged file or folder information
+-----------------------------------
+
+.. list-table::
+   :widths: 15 5 10 30
+   :header-rows: 1
+
+   * - Name
+     - Multiplicity
+     - Type
+     - Description
+   * - ``name``
+     - 1
+     - String
+     - The name of the file or folder without path. E.g. "file.gco" for a file "file.gco" located anywhere in the file system.
+       Currently this will always fit into ASCII.
+   * - ``display``
+     - 1
+     - String
+     - The name of the file without the path, this potentially with non-ASCII unicode characters.
+       E.g. "a turtle 🐢.gco" for a file "a_turtle_turtle.gco" located anywhere in the file system.
+   * - ``path``
+     - 1
+     - String
+     - The path to the file or folder within the location. E.g. "folder/subfolder/file.gco" for a file "file.gco" located within
+       "folder" and "subfolder" relative to the root of the location. Currently this will always fit into ASCII.
+   * - ``origin``
+     - 1
+     - String, either ``local`` or ``sdcard``
+     - The origin of the file, ``local`` when stored in OctoPrint's ``uploads`` folder, ``sdcard`` when stored on the
+       printer's SD card (if available)
+   * - ``refs``
+     - 0..1
+     - :ref:`sec-api-datamodel-files-ref`
+     - References relevant to this file or folder, left out in abridged version
+
 .. _sec-api-datamodel-files-gcodeanalysis:
 
 GCODE analysis information
@@ -321,14 +389,58 @@ GCODE analysis information
      - 0..1
      - Object
      - The estimated usage of filament
-   * - ``filament.length``
+   * - ``filament.tool{n}.length``
      - 0..1
      - Integer
      - The length of filament used, in mm
-   * - ``filament.volume``
+   * - ``filament.tool{n}.volume``
      - 0..1
      - Float
      - The volume of filament used, in cm³
+   * - ``dimensions``
+     - 0..1
+     - Object
+     - Information regarding the size of the printed model
+   * - ``dimensions.depth``
+     - 0..1
+     - Float
+     - The depth of the printed model, in mm
+   * - ``dimensions.height``
+     - 0..1
+     - Float
+     - The height of the printed model, in mm
+   * - ``dimensions.width``
+     - 0..1
+     - Float
+     - The width of the printed model, in mm
+   * - ``printingArea``
+     - 0..1
+     - Object
+     - Information regarding the size of the printing area
+   * - ``printingArea.maxX``
+     - 0..1
+     - Float
+     - The maximum X coordinate of the printed model, in mm
+   * - ``printingArea.maxY``
+     - 0..1
+     - Float
+     - The maximum Y coordinate of the printed model, in mm
+   * - ``printingArea.maxZ``
+     - 0..1
+     - Float
+     - The maximum Z coordinate of the printed model, in mm
+   * - ``printingArea.minX``
+     - 0..1
+     - Float
+     - The minimum X coordinate of the printed model, in mm
+   * - ``printingArea.minY``
+     - 0..1
+     - Float
+     - The minimum Y coordinate of the printed model, in mm
+   * - ``printingArea.minZ``
+     - 0..1
+     - Float
+     - The minimum Z coordinate of the printed model, in mm
 
 
 .. _sec-api-datamodel-files-ref:
@@ -347,13 +459,13 @@ References
    * - ``resource``
      - 1
      - URL
-     - The resource that represents the file (e.g. for issuing commands to or for deleting)
+     - The resource that represents the file or folder (e.g. for issuing commands to or for deleting)
    * - ``download``
      - 0..1
      - URL
-     - The download URL for the file
+     - The download URL for the file. Never present for folders.
    * - ``model``
      - 0..1
      - URL
-     - The model from which this file was generated (e.g. an STL, currently not used)
-
+     - The model from which this file was generated (e.g. an STL, currently not used). Never present for
+       folders.

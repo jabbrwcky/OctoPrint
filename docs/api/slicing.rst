@@ -32,7 +32,7 @@ List All Slicers and Slicing Profiles
 
    .. sourcecode:: http
 
-      GET /api/slicing/profiles HTTP/1.1
+      GET /api/slicing HTTP/1.1
       Host: example.com
       X-Api-Key: abcdef...
 
@@ -58,11 +58,9 @@ List All Slicers and Slicing Profiles
               "displayName": "Medium Quality",
               "default": true,
               "resource": "http://example.com/api/slicing/cura/profiles/medium_quality"
-            },
-            ...
+            }
           }
-        },
-        ...
+        }
       }
 
    :statuscode 200: No error
@@ -104,8 +102,7 @@ List Slicing Profiles of a Specific Slicer
           "displayName": "Medium Quality",
           "default": true,
           "resource": "http://example.com/api/slicing/cura/profiles/medium_quality"
-        },
-        ...
+        }
       }
 
    :param slicer:   The identifying key of the slicer for which to list the available profiles.
@@ -147,8 +144,7 @@ Retrieve Specific Profile
           "brim_line_count": 20,
           "cool_head_lift": false,
           "cool_min_feedrate": 10.0,
-          "cool_min_layer_time": 5.0,
-          ...
+          "cool_min_layer_time": 5.0
         }
       }
 
@@ -171,6 +167,8 @@ Add Slicing Profile
 
    Returns a :http:statuscode:`201` and an :ref:`abridged Profile <sec-api-slicing-datamodel-profile>` in the body
    upon successful completion.
+
+   Requires admin rights.
 
    **Example**
 
@@ -218,6 +216,8 @@ Delete Slicing Profile
    Delete the slicing profile identified by ``key`` for the slicer ``slicer``. If the profile doesn't exist, the
    request will succeed anyway.
 
+   Requires admin rights.
+
    :param slicer:   The identifying key of the slicer for which to delete the profile
    :param key:      The identifying key of the profile to delete
    :statuscode 204: No error
@@ -225,8 +225,8 @@ Delete Slicing Profile
 
 .. _sec-api-slicing-datamodel:
 
-Datamodel
-=========
+Data model
+==========
 
 .. _sec-api-slicing-datamodel-slicerlist:
 
@@ -264,9 +264,14 @@ Slicer
      - ``string``
      - Identifier of the slicer
    * - ``displayName``
-     - 0..1
+     - 1
      - ``string``
      - Display name of the slicer
+   * - ``sameDevice``
+     - 1
+     - ``boolean``
+     - Whether the slicer runs on the same device as OctoPrint (``true``) and hence can't be used while printing,
+       or not (``false``)
    * - ``default``
      - 1
      - ``boolean``

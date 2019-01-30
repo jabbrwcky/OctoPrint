@@ -1,6 +1,6 @@
 # Authors
 
-The following people have contributed to OctoPrint's code base (ordered by
+The following people have contributed to OctoPrint's code base (ordered roughly by
 date of first contribution):
 
   * [Gina Häußge](https://github.com/foosel)
@@ -56,6 +56,44 @@ date of first contribution):
   * [Mark Bastiaans](https://github.com/markbastiaans)
   * [Marcel Hellwig](https://github.com/punkkeks)
   * [Kevin Murphy](https://github.com/kevingelion)
+  * [Richard Joyce](https://github.com/richjoyce)
+  * ["bwgan"](https://github.com/bwgan)
+  * [Siim Raud](https://github.com/2ndalpha)
+  * ["geoporalis"](https://github.com/geoporalis)
+  * [Andrew Malota](https://github.com/2bitoperations)
+  * [Ishwar Agarwal](https://github.com/agarwali)
+  * [Kye Hoover](https://github.com/eykrevooh)
+  * [Joseph Carrick](https://github.com/carricktel)
+  * [Alexander Leisentritt](https://github.com/Alex9779)
+  * [therealbstern](https://github.com/therealbstern)
+  * [Philipp Baum](https://github.com/philphilphil)
+  * [Kyle Evans](https://github.com/kevans91)
+  * [Javier Martínez Arrieta](https://github.com/Javierma)
+  * ["MirceaDan"](https://github.com/ByReaL)
+  * [Ovidiu Hossu](https://github.com/MoonshineSG)
+  * [Eyck Jentzsch](https://github.com/eyck)
+  * [Mathias Rangel Wulff](https://github.com/mathiasrw)
+  * [Clemens Niemeyer](https://github.com/clemniem)
+  * ["I-am-me"](https://github.com/I-am-me)
+  * [Noah Martin](https://github.com/noahsmartin)
+  * [Eyal Soha](https://github.com/eyal0)
+  * [Greg Hulands](https://github.com/ghulands)
+  * [Andreas Werner](https://github.com/gallore)
+  * [Shawn Bruce](https://github.com/kantlivelong)
+  * [Claudiu Ceia](https://github.com/ClaudiuCeia)
+  * [Goswin von Brederlow](https://github.com/mrvn)
+  * [Luke McKechnie](https://github.com/galamdring)
+  * [Peter Backx](https://github.com/pbackx)
+  * [Josh Major](https://github.com/astateofblank)
+  * ["alex-gh"](https://github.com/alex-gh)
+  * [Bernd Zeimetz](https://github.com/bzed)
+  * [Daniele Forsi](https://github.com/dforsi)
+  * [Ganey](https://github.com/ganey)
+  * [Sven Lohrmann](https://github.com/malnvenshorn)
+  * [Andy Castille](https://github.com/klikini)
+  * [Gaston Dombiak](https://github.com/gdombiak)
+  * [Brad Fisher](https://github.com/bradcfisher)
+  * [Aldo Hoeben](https://github.com/fieldofview)
 
 OctoPrint started off as a fork of [Cura](https://github.com/daid/Cura) by
 [Daid Braam](https://github.com/daid). Parts of its communication layer and

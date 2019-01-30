@@ -1,5 +1,5 @@
 # coding=utf-8
-from __future__ import absolute_import
+from __future__ import absolute_import, division, print_function
 
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = 'GNU Affero General Public License http://www.gnu.org/licenses/agpl.html'
@@ -10,10 +10,10 @@ import shutil
 import glob
 
 from setuptools import Command
+from distutils.command.clean import clean as _clean
 
 
 def package_data_dirs(source, sub_folders):
-	import os
 	dirs = []
 
 	for d in sub_folders:
@@ -50,64 +50,91 @@ def recursively_handle_files(directory, file_matcher, folder_matcher=None, folde
 	return applied_handler
 
 
-class CleanCommand(Command):
-	description = "clean build artifacts"
-	user_options = []
-	boolean_options = []
+def has_requirement(requirement, requirements):
+	if requirement is None or requirements is None:
+		return False
 
-	build_folder = "build"
+	assert isinstance(requirement, basestring)
+	assert isinstance(requirements, (list, tuple))
+	assert all(map(lambda x: x is not None and isinstance(x, basestring), requirements))
+
+	requirement = requirement.lower()
+	requirements = [r.lower() for r in requirements]
+	compat = [requirement.lower() + c for c in ("<", "<=", "!=", "==", ">=", ">", "~=", "===")]
+
+	return requirement in requirements or \
+	       any(any(r.startswith(c) for c in compat) for r in requirements)
+
+
+class CleanCommand(_clean):
+	user_options = _clean.user_options + [("orig", None, "behave like original clean command"),
+	                                      ("noeggs", None, "don't clean up eggs"),
+	                                      ("nopyc", None, "don't clean up pyc files")]
+	boolean_options = _clean.boolean_options + ["orig", "noeggs", "nopyc"]
+
 	source_folder = "src"
-	eggs = []
+	eggs =None
 
 	@classmethod
-	def for_options(cls, build_folder="build", source_folder="src", eggs=None):
+	def for_options(cls, source_folder="src", eggs=None):
 		if eggs is None:
 			eggs = []
 		return type(cls)(cls.__name__, (cls,), dict(
-			build_folder=build_folder,
 			source_folder=source_folder,
 			eggs=eggs
 		))
 
 	def initialize_options(self):
-		pass
+		_clean.initialize_options(self)
+
+		self.orig = None
+		self.noeggs = None
+		self.nopyc = None
 
 	def finalize_options(self):
-		pass
+		_clean.finalize_options(self)
+
+		if not self.orig:
+			self.all = True
 
 	def run(self):
-		# build folder
-		if os.path.exists(self.__class__.build_folder):
-			print "Deleting build directory"
-			shutil.rmtree(self.__class__.build_folder)
+		_clean.run(self)
+		if self.orig:
+			return
 
 		# eggs
-		for egg in self.__class__.eggs:
-			globbed_eggs = glob.glob(egg)
-			for globbed_egg in globbed_eggs:
-				print "Deleting %s directory" % globbed_egg
-				shutil.rmtree(globbed_egg)
+		if not self.noeggs:
+			for egg in self.eggs:
+				globbed_eggs = glob.glob(egg)
+				for globbed_egg in globbed_eggs:
+					print("deleting '%s' egg" % globbed_egg)
+					if not self.dry_run:
+						shutil.rmtree(globbed_egg)
 
 		# pyc files
-		def delete_folder_if_empty(path, applied_handler):
-			if not applied_handler:
-				return
-			if len(os.listdir(path)) == 0:
-				shutil.rmtree(path)
-				print "Deleted %s since it was empty" % path
+		if not self.nopyc:
+			def delete_folder_if_empty(path, applied_handler):
+				if not applied_handler:
+					return
+				if len(os.listdir(path)) == 0:
+					if not self.dry_run:
+						shutil.rmtree(path)
+					print("removed %s since it was empty" % path[len(self.source_folder):])
 
-		def delete_file(path):
-			os.remove(path)
-			print "Deleted %s" % path
+			def delete_file(path):
+				print("removing '%s'" % path[len(self.source_folder):])
+				if not self.dry_run:
+					os.remove(path)
 
-		import fnmatch
-		recursively_handle_files(
-			os.path.abspath(self.__class__.source_folder),
-			lambda name: fnmatch.fnmatch(name.lower(), "*.pyc"),
-			folder_matcher=lambda dir, name, path: name != ".git",
-			folder_handler=delete_folder_if_empty,
-			file_handler=delete_file
-		)
+			import fnmatch
+			print("recursively removing *.pyc from '%s'" % self.source_folder)
+			recursively_handle_files(
+				os.path.abspath(self.source_folder),
+				lambda name: fnmatch.fnmatch(name.lower(), "*.pyc"),
+				folder_matcher=lambda dir, name, path: name != ".git",
+				folder_handler=delete_folder_if_empty,
+				file_handler=delete_file
+			)
 
 
 class NewTranslation(Command):
@@ -255,6 +282,7 @@ class RefreshTranslation(Command):
 		self.babel_update_messages.input_file = self.__class__.pot_file
 		self.babel_update_messages.output_dir = self.__class__.output_dir
 		self.babel_update_messages.locale = self.locale
+		self.babel_update_messages.finalize_options()
 
 	def run(self):
 		self.babel_extract_messages.run()
@@ -287,6 +315,7 @@ class CompileTranslation(Command):
 
 	def finalize_options(self):
 		self.babel_compile_messages.directory = self.__class__.output_dir
+		self.babel_compile_messages.finalize_options()
 
 	def run(self):
 		self.babel_compile_messages.run()
@@ -466,7 +495,7 @@ def create_plugin_setup_parameters(identifier="todo", name="TODO", version="0.1"
 		requires = ["OctoPrint"]
 	if not isinstance(requires, list):
 		raise ValueError("requires must be a list")
-	if "OctoPrint" not in requires:
+	if not has_requirement("OctoPrint", requires):
 		requires = ["OctoPrint"] + list(requires)
 
 	if extra_requires is None:
@@ -495,8 +524,7 @@ def create_plugin_setup_parameters(identifier="todo", name="TODO", version="0.1"
 	translation_dir = os.path.join(source_folder, "translations")
 	pot_file = os.path.join(translation_dir, "messages.pot")
 	bundled_dir = os.path.join(source_folder, package, "translations")
-	if os.path.isdir(translation_dir) and os.path.isfile(pot_file):
-		cmdclass.update(get_babel_commandclasses(pot_file=pot_file, output_dir=translation_dir, bundled_dir=bundled_dir, pack_name_prefix="{name}-i18n-".format(**locals()), pack_path_prefix="_plugins/{identifier}/".format(**locals())))
+	cmdclass.update(get_babel_commandclasses(pot_file=pot_file, output_dir=translation_dir, bundled_dir=bundled_dir, pack_name_prefix="{name}-i18n-".format(**locals()), pack_path_prefix="_plugins/{identifier}/".format(**locals())))
 
 	from setuptools import find_packages
 	packages = list(set([package] + filter(lambda x: x.startswith("{package}.".format(package=package)), find_packages(where=source_folder, exclude=ignored_packages)) + additional_packages))

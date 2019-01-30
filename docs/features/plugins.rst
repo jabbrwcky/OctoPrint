@@ -11,6 +11,16 @@ Right now plugins can be used to extend OctoPrint's web interface, to execute sp
 shutdown, to provide custom (API) endpoints or whole user interfaces with special functionality, to react to system
 events or progress reports or to add support for additional slicers. More plugin types are planned for the future.
 
+.. note::
+
+   Since a plugin might not function properly and cause issues that are hard to diagnose or outright disrupt server
+   functionality, you might want to be able to start OctoPrint without any third party plugins enabled. This is also
+   very important when reporting bugs in OctoPrint, to ensure that what you are observing is actually a bug in
+   OctoPrint and not in any of your installed third party plugins.
+
+   To do that, OctoPrint has a built-in safe mode that disables all plugins not shipped as part of OctoPrint. You can
+   read more on how to enable that :ref:`here <sec-features-safemode>`.
+
 .. _sec-features-plugins-available:
 
 Finding Plugins
@@ -36,7 +46,7 @@ Manual Installation
 
 If you don't want or can't use the Plugin Manager, plugins may also be installed manually either by copying and
 unpacking them into one of the configured plugin folders (regularly those are ``<octoprint source root>/plugins`` and
-``<octoprint config folder>/plugins`` [#f1]_ or by installing them as regular python modules via ``pip`` [#f2]_.
+``<octoprint config folder>/plugins`` [#f1]_ or by installing them as regular Python modules via ``pip`` [#f2]_.
 
 For a plugin available on the Python Package Index (PyPi), the process is as simple as issuing a
 

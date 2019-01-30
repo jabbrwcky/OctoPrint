@@ -18,7 +18,7 @@ $(function() {
         };
 
         self.showDialog = function() {
-            if (!CONFIG_WIZARD || !(CONFIG_FIRST_RUN || self.loginState.isAdmin())) return;
+            if (!CONFIG_WIZARD || !((CONFIG_FIRST_RUN && !CONFIG_ACCESS_CONTROL_ACTIVE) || self.loginState.isAdmin())) return;
 
             self.getWizardDetails()
                 .done(function(response) {
@@ -32,6 +32,11 @@ $(function() {
                             'margin-left': function() { return -($(this).width() /2); }
                         });
                     }
+
+                    callViewModels(self.allViewModels, "onWizardShow");
+
+                    callViewModels(self.allViewModels, "onBeforeWizardTabChange", [OCTOPRINT_INITIAL_WIZARD, undefined]);
+                    callViewModels(self.allViewModels, "onAfterWizardTabChange", [OCTOPRINT_INITIAL_WIZARD]);
                 });
         };
 
@@ -41,6 +46,13 @@ $(function() {
 
         self.onStartup = function() {
             self.wizardDialog = $("#wizard_dialog");
+            self.wizardDialog.on('show', function(event) {
+                OctoPrint.coreui.wizardOpen = true;
+            });
+            self.wizardDialog.on('hidden', function(event) {
+                OctoPrint.coreui.wizardOpen = false;
+            });
+
             self.reloadOverlay = $("#reloadui_overlay");
         };
 
@@ -95,8 +107,19 @@ $(function() {
 
                     if (current != undefined && next != undefined) {
                         var result = true;
-                        callViewModels(allViewModels, "onWizardTabChange", function(method) {
-                            result = result && (method(current, next) !== false);
+                        callViewModels(allViewModels, "onBeforeWizardTabChange", function(method) {
+                            // we want to continue evaluating even if result becomes false
+                            result = (method(next, current) !== false) && result;
+                        });
+
+                        // also trigger the onWizardTabChange event here which we misnamed and
+                        // on which we misordered the parameters on during development but which might
+                        // already be used somewhere - log a deprecation warning to console though
+                        callViewModels(allViewModels, "onWizardTabChange", function(method, viewModel) {
+                            log.warn("View model", viewModel, "is using deprecated callback \"onWizardTabChange\", please change to \"onBeforeWizardTabChange\"");
+
+                            // we want to continue evaluating even if result becomes false
+                            result = (method(current, next) !== false) && result;
                         });
                         return result;
                     }
@@ -130,6 +153,7 @@ $(function() {
                                 if (reload) {
                                     self.reloadOverlay.show();
                                 }
+                                callViewModels(allViewModels, "onAfterWizardFinish");
                             });
                     }
                 }
@@ -171,18 +195,34 @@ $(function() {
         self.onSettingsPreventRefresh = function() {
             if (!self.finishing && self.isDialogActive()
                 && hasDataChanged(self.settingsViewModel.getLocalData(), self.settingsViewModel.lastReceivedSettings)) {
+                var preventSettingsRefreshDialog = false;
+                callViewModels(self.allViewModels, "onWizardPreventSettingsRefreshDialog", function(method) {
+                    // if any of our methods returns that it wants to prevent the dialog
+                    // we'll need to set preventSettingsRefreshDialog to true
+                    //
+                    // order is important here - the method call needs to happen
+                    // first, or it won't happen after the flag has been
+                    // set once due to the || making further evaluation unnecessary
+                    // then
+                    preventSettingsRefreshDialog = (method() === true) || preventSettingsRefreshDialog;
+                });
+
                 // we have local changes, show update dialog
-                self.settingsViewModel.settingsUpdatedDialog.modal("show");
-                return true;
+                if (preventSettingsRefreshDialog) {
+                    return false;
+                } else {
+                    self.settingsViewModel.settingsUpdatedDialog.modal("show");
+                    return true;
+                }
             }
 
             return false;
         }
     }
 
-    OCTOPRINT_VIEWMODELS.push([
-        WizardViewModel,
-        ["loginStateViewModel", "settingsViewModel"],
-        "#wizard_dialog"
-    ]);
+    OCTOPRINT_VIEWMODELS.push({
+        construct: WizardViewModel,
+        dependencies: ["loginStateViewModel", "settingsViewModel"],
+        elements: ["#wizard_dialog"]
+    });
 });

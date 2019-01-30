@@ -1,5 +1,5 @@
 # coding=utf-8
-from __future__ import absolute_import
+from __future__ import absolute_import, division, print_function
 
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = 'GNU Affero General Public License http://www.gnu.org/licenses/agpl.html'
@@ -7,6 +7,11 @@ __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms
 
 
 import re
+
+# noinspection PyCompatibility
+from builtins import range
+# noinspection PyCompatibility
+from past.builtins import basestring
 
 class SupportLocationTypes(object):
 	NONE = "none"
@@ -31,6 +36,11 @@ class MachineShapeTypes(object):
 	SQUARE = "square"
 	CIRCULAR = "circular"
 
+class RetractionCombingTypes(object):
+	OFF = "off"
+	ALL = "all"
+	NO_SKIN = "no skin"
+
 class GcodeFlavors(object):
 	REPRAP = (0, "reprap")
 	ULTIGCODE = (1, "ultigcode")
@@ -45,7 +55,7 @@ defaults = dict(
     wall_thickness=0.8,
     solid_layer_thickness=0.6,
     print_temperature=[220, 0, 0, 0],
-    print_bed_temperature=70,
+    print_bed_temperature=0,
     platform_adhesion=PlatformAdhesionTypes.NONE,
     filament_diameter=[2.85, 0, 0, 0],
     filament_flow=100.0,
@@ -57,12 +67,14 @@ defaults = dict(
     solid_top=True,
     solid_bottom=True,
     fill_overlap=15,
+    perimeter_before_infill=False,
 
     # speeds
     print_speed=50.0,
     travel_speed=150.0,
     bottom_layer_speed=20.0,
     infill_speed=0.0,
+    solidarea_speed=0.0,
     outer_shell_speed=0.0,
     inner_shell_speed=0.0,
 
@@ -111,8 +123,11 @@ defaults = dict(
     raft_base_linewidth=1.0,
     raft_interface_thickness=0.27,
     raft_interface_linewidth=0.4,
+    raft_airgap_all=0.0,
     raft_airgap=0.22,
     raft_surface_layers=2,
+    raft_surface_thickness=0.27,
+    raft_surface_linewidth=0.4,
 
     # repairing
     fix_horrible_union_all_type_a=True,
@@ -344,6 +359,8 @@ class Profile(object):
 	regex_print_temperature = re.compile("print_temperature(\d?)")
 	regex_strip_comments = re.compile(";.*$", flags=re.MULTILINE)
 
+	regex_broken_replacements = re.compile("\?([a-zA-Z0-9_]*)\?")
+
 	@classmethod
 	def from_cura_ini(cls, path):
 		import logging
@@ -390,34 +407,13 @@ class Profile(object):
 				"Both": SupportDualTypes.BOTH,
 				"First extruder": SupportDualTypes.FIRST,
 				"Second extruder": SupportDualTypes.SECOND
+			},
+			retraction_combing={
+				"Off": RetractionCombingTypes.OFF,
+				"All": RetractionCombingTypes.ALL,
+				"No Skin": RetractionCombingTypes.NO_SKIN
 			}
 		)
-
-		# Translation dict for new CuraEngine option names
-		new_engine_options = dict(
-			fill_sparse_density="fill_density",
-			machine_nozzle_size="nozzle_size",
-			material_print_temperature="print_temperature",
-			#support_type="support", # In conflict with "support_type" from old CuraEngine
-			support_pattern="support_type",
-			adhesion_type="platform_adhesion",
-			material_diameter="filament_diameter",
-			material_flow="filament_flow",
-			speed_travel="travel_speed",
-			speed_layer_0="bottom_layer_speed",
-			speed_print="print_speed",
-			speed_infill="infill_speed",
-			speed_wall_0="outer_shell_speed",
-			speed_wall_x="inner_shell_speed",
-			cool_fan_enabled="fan_enabled",
-			cool_fan_full_at_height="fan_full_height",
-			cool_fan_speed="fan_speed",
-			cool_fan_speed_max="fan_speed_max",
-			cool_lift_head="cool_head_lift",
-			cool_min_speed="cool_min_feedrate",
-			machine_start_gcode="start_gcode",
-			machine_end_gcode="end_gcode",
-			machine_gcode_flavor="gcode_flavor")
 
 		result = dict()
 		for section in config.sections():
@@ -449,13 +445,16 @@ class Profile(object):
 				index = None
 
 				for opt in arrayified_options:
-					if key.startswith(opt):
+					# if there's a period, the index comes before it
+					optsplit = opt.split('.')
+					keysplit = key.split('.')
+					if key.startswith(optsplit[0]) and keysplit[1:] == optsplit[1:]:
 						if key == opt:
 							index = 0
 						else:
 							try:
 								# try to convert the target index, e.g. print_temperature2 => print_temperature[1]
-								index = int(key[len(opt):]) - 1
+								index = int(keysplit[0][len(optsplit[0]):]) - 1
 							except ValueError:
 								# ignore entries for which that fails
 								ignored = True
@@ -468,10 +467,6 @@ class Profile(object):
 					# if the key has to be translated to a new value, do that now
 					key = translated_options[key]
 
-				if key in new_engine_options:
-					# if the key has to be translated from the new CuraEngine versions, do that now
-					key = new_engine_options[key]
-
 				if key in value_conversions and value in value_conversions[key]:
 					value = value_conversions[key][value]
 
@@ -483,7 +478,7 @@ class Profile(object):
 					if not key in result:
 						result[key] = []
 					if len(result[key]) <= index:
-						for n in xrange(index - len(result[key]) + 1):
+						for n in range(index - len(result[key]) + 1):
 							result[key].append(None)
 					result[key][index] = value
 				else:
@@ -536,7 +531,7 @@ class Profile(object):
 			# So override > profile > default, if neither override nor profile value are available
 			# the default value should just be left as is
 
-			for x in xrange(len(result)):
+			for x in range(len(result)):
 				if override_value is not None and  x < len(override_value) and override_value[x] is not None:
 					# we have an override value for this location, so we use it
 					result[x] = override_value[x]
@@ -613,8 +608,8 @@ class Profile(object):
 			diameters = self._get("filament_diameter")
 			if not match.group(1):
 				return diameters[0]
-			index = int(match.group(1))
-			if index >= len(diameters):
+			index = int(match.group(1)) - 1
+			if index >= len(diameters) or index < 0:
 				return 0.0
 			return diameters[index]
 
@@ -626,8 +621,8 @@ class Profile(object):
 			temperatures = self._get("print_temperature")
 			if not match.group(1):
 				return temperatures[0]
-			index = int(match.group(1))
-			if index >= len(temperatures):
+			index = int(match.group(1)) - 1
+			if index >= len(temperatures) or index < 0:
 				return 0.0
 			return temperatures[index]
 
@@ -685,18 +680,16 @@ class Profile(object):
 			return default
 		return int(value * 1000)
 
-	def get_gcode_template(self, key):
-		extruder_count = self.get_int("extruder_amount")
-
+	def get_gcode_template(self, key, extruder_count=1):
 		if key in self._profile:
 			gcode = self._profile[key]
 		else:
 			gcode = defaults[key]
 
 		if key in ("start_gcode", "end_gcode"):
-			return gcode[extruder_count-1]
+			return self.regex_broken_replacements.sub("{\\1}", gcode[extruder_count-1])
 		else:
-			return gcode
+			return self.regex_broken_replacements.sub("{\\1}", gcode)
 
 	def get_profile_string(self):
 		import base64
@@ -747,7 +740,7 @@ class Profile(object):
 
 		return pre + str(f)
 
-	def get_gcode(self, key, new_engine=False):
+	def get_gcode(self, key, extruder_count=1):
 		prefix = ""
 		postfix = ""
 
@@ -757,57 +750,57 @@ class Profile(object):
 			return ""
 
 		if key == "start_gcode":
-			contents = self.get_gcode_template("start_gcode")
-
-			# If using the new CuraEngine, there is no need to extend the start_gcode
-			if not new_engine:
-				prefix += self.get_start_gcode_prefix(contents)
+			contents = self.get_gcode_template("start_gcode", extruder_count=extruder_count)
+			prefix += self.get_start_gcode_prefix(contents, extruder_count=extruder_count)
 
 		else:
-			contents = self.get_gcode_template(key)
+			contents = self.get_gcode_template(key, extruder_count=extruder_count)
 
 		return unicode(prefix + re.sub("(.)\{([^\}]*)\}", self.replaceTagMatch, contents).rstrip() + '\n' + postfix).strip().encode('utf-8') + '\n'
 
-	def get_start_gcode_prefix(self, contents):
-		extruder_count = self.get_int("extruder_amount")
-
+	def get_start_gcode_prefix(self, contents, extruder_count=1):
 		prefix = ""
+		without_comments = Profile.regex_strip_comments.sub("", contents)
+
+		gcode_parameter_key = "S"
+		if self.get("gcode_flavor") == GcodeFlavors.MACH3:
+			gcode_parameter_key = "P"
 
 		e_steps = self.get_float("steps_per_e")
 		if e_steps > 0:
-			prefix += "M92 E{e_steps}\n" % (e_steps)
+			prefix += "M92 E{e_steps}\n".format(e_steps=e_steps)
 		temp = self.get_float("print_temperature")
 
 		bed_temp = 0
 		if self.get_boolean("has_heated_bed"):
 			bed_temp = self.get_float("print_bed_temperature")
-		include_bed_temp = bed_temp > 0 and not "{print_bed_temperature}" in Profile.regex_strip_comments.sub("", contents)
+		include_bed_temp = bed_temp > 0 and not "{print_bed_temperature}" in without_comments
 
 		if include_bed_temp:
-			prefix += "M140 S{bed_temp}\n".format(bed_temp=bed_temp)
+			prefix += "M140 {param}{bed_temp}\n".format(param=gcode_parameter_key, bed_temp=bed_temp)
 
-		if temp > 0 and not "{print_temperature}" in Profile.regex_strip_comments.sub("", contents):
+		if temp > 0 and not "{print_temperature}" in without_comments:
 			if extruder_count > 0:
-				def temp_line(temp, extruder, template):
+				def temp_line(temp, extruder, param, template):
 					t = temp
 					if extruder > 0:
 						print_temp = self.get_float("print_temperature%d" % (extruder + 1))
 						if print_temp > 0:
 							t = print_temp
-					return template.format(extruder=extruder, temp=t)
+					return template.format(extruder=extruder, temp=t, param=param)
 
 				prefix_preheat = ""
 				prefix_waitheat = ""
-				for n in xrange(0, extruder_count):
+				for n in range(0, extruder_count):
 					if n > 0:
-						prefix_preheat += temp_line(temp, n, "M104 T{extruder} S{temp}\n")
-					prefix_waitheat += temp_line(temp, n, "M109 T{extruder} S{temp}\n")
+						prefix_preheat += temp_line(temp, n, gcode_parameter_key, "M104 T{extruder} {param}{temp}\n")
+					prefix_waitheat += temp_line(temp, n, gcode_parameter_key, "M109 T{extruder} {param}{temp}\n")
 				prefix += prefix_preheat + prefix_waitheat + "T0\n"
 			else:
-				prefix += "M109 S{temp}\n".format(temp=temp)
+				prefix += "M109 {param}{temp}\n".format(param=gcode_parameter_key, temp=temp)
 
 		if include_bed_temp:
-			prefix += "M190 S{bed_temp}\n".format(bed_temp=bed_temp)
+			prefix += "M190 {param}{bed_temp}\n".format(param=gcode_parameter_key, bed_temp=bed_temp)
 
 		return prefix
 
@@ -841,7 +834,7 @@ class Profile(object):
 		if layer_height == 0.0:
 			return 1
 		import math
-		return int(math.ceil(solid_thickness / (layer_height - 0.0001)))
+		return int(math.ceil((solid_thickness - 0.0001) / layer_height))
 
 	def calculate_minimal_extruder_count(self):
 		extruder_count = self.get("extruder_amount")
@@ -854,7 +847,7 @@ class Profile(object):
 		return 1
 
 	def get_pos_x(self):
-		if self._posX:
+		if self._posX is not None:
 			try:
 				return int(float(self._posX))
 			except ValueError:
@@ -863,7 +856,7 @@ class Profile(object):
 		return int(self.get_float("machine_width") / 2.0 ) if not self.get_boolean("machine_center_is_zero") else 0.0
 
 	def get_pos_y(self):
-		if self._posY:
+		if self._posY is not None:
 			try:
 				return int(float(self._posY))
 			except ValueError:
@@ -871,13 +864,14 @@ class Profile(object):
 
 		return int(self.get_float("machine_depth") / 2.0) if not self.get_boolean("machine_center_is_zero") else 0.0
 
-	def convert_to_engine(self):
+	def convert_to_engine(self, used_extruders=1):
 
 		edge_width, line_count = self.calculate_edge_width_and_line_count()
 		solid_layer_count = self.calculate_solid_layer_count()
 
 		extruder_count = self.get_int("extruder_amount")
 		minimal_extruder_count = self.calculate_minimal_extruder_count()
+		actual_extruder_count = max(minimal_extruder_count, used_extruders)
 
 		settings = {
 			"layerThickness": self.get_microns("layer_height"),
@@ -890,12 +884,14 @@ class Profile(object):
 			"downSkinCount": solid_layer_count if self.get_boolean("solid_bottom") else 0,
 			"upSkinCount": solid_layer_count if self.get_boolean("solid_top") else 0,
 			"infillOverlap": self.get_int("fill_overlap"),
+			"perimeterBeforeInfill": 1 if self.get_boolean("perimeter_before_infill") else 0,
 			"initialSpeedupLayers": int(4),
 			"initialLayerSpeed": self.get_int("bottom_layer_speed"),
 			"printSpeed": self.get_int("print_speed"),
 			"infillSpeed": self.get_int("infill_speed") if self.get_int("infill_speed") > 0 else self.get_int("print_speed"),
 			"inset0Speed": self.get_int("outer_shell_speed") if self.get_int("outer_shell_speed") > 0 else self.get_int("print_speed"),
 			"insetXSpeed": self.get_int("inner_shell_speed") if self.get_int("inner_shell_speed") > 0 else self.get_int("print_speed"),
+			"skinSpeed": self.get_int("solidarea_speed") if self.get_int("solidarea_speed") > 0 > 0 else self.get_int("print_speed"),
 			"moveSpeed": self.get_int("travel_speed"),
 			"fanSpeedMin": self.get_int("fan_speed") if self.get_boolean("fan_enabled") else 0,
 			"fanSpeedMax": self.get_int("fan_speed_max") if self.get_boolean("fan_enabled") else 0,
@@ -911,22 +907,23 @@ class Profile(object):
 			"retractionAmountExtruderSwitch": self.get_microns("retraction_dual_amount"),
 			"retractionZHop": self.get_microns("retraction_hop"),
 			"minimalExtrusionBeforeRetraction": self.get_microns("retraction_minimal_extrusion"),
-			"enableCombing": 1 if self.get_boolean("retraction_combing") else 0,
 			"multiVolumeOverlap": self.get_microns("overlap_dual"),
 			"objectSink": max(0, self.get_microns("object_sink")),
 			"minimalLayerTime": self.get_int("cool_min_layer_time"),
 			"minimalFeedrate": self.get_int("cool_min_feedrate"),
 			"coolHeadLift": 1 if self.get_boolean("cool_head_lift") else 0,
 
+			"enableCombing": 1 if self.get("retraction_combing") == RetractionCombingTypes.ALL else (2 if self.get("retraction_combing") == RetractionCombingTypes.NO_SKIN else 0),
+
 			# model positioning
 			"posx": self.get_pos_x() * 1000, # in microns
 			"posy": self.get_pos_y() * 1000, # in microns
 
 			# gcodes
-			"startCode": self.get_gcode("start_gcode"),
-			"endCode": self.get_gcode("end_gcode"),
-			"preSwitchExtruderCode": self.get_gcode("preSwitchExtruder_gcode"),
-			"postSwitchExtruderCode": self.get_gcode("postSwitchExtruder_gcode"),
+			"startCode": self.get_gcode("start_gcode", extruder_count=actual_extruder_count),
+			"endCode": self.get_gcode("end_gcode", extruder_count=actual_extruder_count),
+			"preSwitchExtruderCode": self.get_gcode("preSwitchExtruder_gcode", extruder_count=actual_extruder_count),
+			"postSwitchExtruderCode": self.get_gcode("postSwitchExtruder_gcode", extruder_count=actual_extruder_count),
 
 			# fixing
 			"fixHorrible": 0,
@@ -937,7 +934,7 @@ class Profile(object):
 				settings["extruderOffset[{extruder}].{axis}".format(extruder=extruder, axis=axis.upper())] = self.get("extruder_offset_{axis}{extruder}".format(extruder=extruder, axis=axis.lower()))
 
 		fanFullHeight = self.get_microns("fan_full_height")
-		settings["fanFullOnLayerNr"] = (fanFullHeight - settings["initialLayerThickness"] - 1) / settings["layerThickness"] + 1
+		settings["fanFullOnLayerNr"] = (fanFullHeight - settings["initialLayerThickness"] - 1) // settings["layerThickness"] + 1
 		if settings["fanFullOnLayerNr"] < 0:
 			settings["fanFullOnLayerNr"] = 0
 
@@ -971,12 +968,13 @@ class Profile(object):
 			settings["raftInterfaceThickness"] = self.get_microns("raft_interface_thickness")
 			settings["raftInterfaceLinewidth"] = self.get_microns("raft_interface_linewidth")
 			settings["raftInterfaceLineSpacing"] = self.get_microns("raft_interface_linewidth") * 2
-			settings["raftAirGapLayer0"] = self.get_microns("raft_airgap")
+			settings["raftAirGapLayer0"] = self.get_microns("raft_airgap") + self.get_microns("raft_airgap_all")
+			settings["raftAirGap"] = self.get_microns("raft_airgap_all")
 			settings["raftBaseSpeed"] = self.get_int("bottom_layer_speed")
-			settings["raftFanSpeed"] = 100
-			settings["raftSurfaceThickness"] = settings["raftInterfaceThickness"]
-			settings["raftSurfaceLinewidth"] = int(edge_width * 1000)
-			settings["raftSurfaceLineSpacing"] = int(edge_width * 1000 * 0.9)
+			settings["raftFanSpeed"] = 0
+			settings["raftSurfaceThickness"] = self.get_microns("raft_surface_thickness")
+			settings["raftSurfaceLinewidth"] = self.get_microns("raft_surface_linewidth")
+			settings["raftSurfaceLineSpacing"] = self.get_microns("raft_surface_linewidth")
 			settings["raftSurfaceLayers"] = self.get_int("raft_surface_layers")
 			settings["raftSurfaceSpeed"] = self.get_int("bottom_layer_speed")
 
@@ -1016,131 +1014,20 @@ class Profile(object):
 
 		return settings
 
-	def convert_to_new_engine(self):
-
-		settings = {
-			"layer_height": self.get_float("layer_height"),
-			"wall_thickness": self.get_float("wall_thickness"),
-			"retraction_enable": self.get_boolean("retraction_enable"),
-			"top_bottom_thickness": self.get_float("solid_layer_thickness"),
-			"fill_sparse_density": self.get_float("fill_density"),
-			"machine_nozzle_size": self.get_float("nozzle_size"),
-			"speed_print": self.get_float("print_speed"),
-			"material_print_temperature": self.get_float("print_temperature"),
-			"material_diameter": self.get_float("filament_diameter"),
-			"material_flow": self.get_float("filament_flow"),
-			"retraction_speed": self.get_float("retraction_speed"),
-			"retraction_amount": self.get_float("retraction_amount") if self.get_boolean("retraction_enable") else 0,
-			"retraction_min_travel": self.get_float("retraction_min_travel"),
-			"retraction_combing": self.get_boolean("retraction_combing"),
-			"retraction_hop": self.get_float("retraction_hop"),
-			"bottom_thickness": self.get_float("bottom_thickness"),
-			"top_layers": self.calculate_solid_layer_count(),
-			"bottom_layers": self.calculate_solid_layer_count(),
-			"speed_travel": self.get_float("travel_speed"),
-			"speed_layer_0": self.get_float("bottom_layer_speed"),
-			"speed_infill": self.get_float("infill_speed") if self.get_float("infill_speed") > 0 else self.get_float("print_speed"),
-			"speed_wall_0": self.get_float("outer_shell_speed") if self.get_float("outer_shell_speed") > 0 else self.get_float("print_speed"), # Translated from "inset0_speed"
-			"speed_wall_x": self.get_float("inner_shell_speed") if self.get_float("inner_shell_speed") > 0 else self.get_float("print_speed"), # Translated from "insetx_speed"
-			"cool_min_layer_time": self.get_float("cool_min_layer_time"),
-			"cool_fan_enabled": self.get_boolean("fan_enabled"),
-			"cool_fan_full_at_height": self.get_int("fan_full_height"),
-			"cool_fan_speed": self.get_float("fan_speed"),
-			"cool_fan_speed_max": self.get_float("fan_speed_max") if self.get_boolean("fan_enabled") else 0,
-			"cool_lift_head": self.get_boolean("cool_head_lift"),
-			"cool_min_speed": self.get_float("cool_min_feedrate"),
-			"skirt_line_count": self.get_int("skirt_line_count"),
-			"fill_overlap": self.get_float("fill_overlap"),
-			"magic_spiralize": self.get_boolean("spiralize"),
-
-			# machine settings
-
-			"machine_width": self.get_float("machine_width"),
-			"machine_depth": self.get_float("machine_depth"),
-			"machine_center_is_zero": self.get_boolean("machine_center_is_zero"),
-			"machine_heated_bed": self.get_boolean("has_heated_bed"),
-
-			# gcodes
-
-			"machine_start_gcode": self.get_gcode("start_gcode", new_engine=True),
-			"machine_end_gcode": self.get_gcode("end_gcode", new_engine=True),
-		}
-
-		# gcode flavor
-
-		settings["machine_gcode_flavor"] = self.get("gcode_flavor")[0]
-
-		# heated bed - The new CuraEngine uses the integer "material_bed_temperature" instead of the boolean "machine_heated_bed"
-
-		if self.get_boolean("has_heated_bed"):
-			settings["material_bed_temperature"] = self.get_float("print_bed_temperature")
-		else:
-			settings["material_bed_temperature"] = 0
-
-		# support
-
-		if self.get("support") == SupportLocationTypes.NONE:
-			settings["support_enable"] = False
-		else:
-			settings["support_enable"] = True
-			settings["support_angle"] = self.get_float("support_angle")
-			settings["support_fill_rate"] = self.get_float("support_fill_rate")
-			settings["support_xy_distance"] = self.get_float("support_xy_distance")
-			settings["support_z_distance"] = self.get_float("support_z_distance")
-
-			# support type
-
-			if self.get("support") == SupportLocationTypes.TOUCHING_BUILDPLATE:
-				settings["support_type"] = "Touching Buildplate"
-			elif self.get("support") == SupportLocationTypes.EVERYWHERE:
-				settings["support_type"] = "Everywhere"
-
-			# support pattern
-
-			if self.get("support_type") == SupportTypes.GRID:
-				settings["support_pattern"] = "Grid"
-			elif self.get("support_type") == SupportTypes.LINES:
-				settings["support_pattern"] = "Lines"
-
-		# adhesion type
-
-		if self.get("platform_adhesion") == PlatformAdhesionTypes.NONE:
-			settings["adhesion_type"] = "None"
-		elif self.get("platform_adhesion") == PlatformAdhesionTypes.BRIM:
-			settings["adhesion_type"] = "Brim"
-			settings["brim_line_count"] = self.get_int("brim_line_count")
-		elif self.get("platform_adhesion") == PlatformAdhesionTypes.RAFT:
-			settings["adhesion_type"] = "Raft"
-			settings["raft_margin"] = self.get_int("raft_margin")
-			settings["raft_line_spacing"] = self.get_float("raft_line_spacing")
-			settings["raft_base_thickness"] = self.get_float("raft_base_thickness")
-			settings["raft_base_linewidth"] = self.get_float("raft_base_linewidth")
-			settings["raft_interface_thickness"] = self.get_float("raft_interface_thickness")
-			settings["raft_interface_linewidth"] = self.get_float("raft_interface_linewidth")
-			settings["raft_airgap"] = self.get_float("raft_airgap")
-			settings["raft_surface_layers"] = self.get_int("raft_surface_layers")
-
-		# skirt
-
-		if self.get_int("skirt_line_count") != 0:
-			settings["skirt_gap"] = self.get_float("skirt_gap")
-			settings["skirt_minimal_length"] = self.get_float("skirt_minimal_length")
-
-		return settings
 
 def parse_gcode_flavor(value):
 
-		value = value.lower()
+	value = value.lower()
 
-		if "reprap" in value and ("volume" in value or "volumatric" in value):
-			return GcodeFlavors.REPRAP_VOLUME
-		elif "ultigcode" in value:
-			return GcodeFlavors.ULTIGCODE
-		elif "makerbot" in value:
-			return GcodeFlavors.MAKERBOT
-		elif "bfb" in value:
-			return GcodeFlavors.BFB
-		elif "mach3" in value:
-			return GcodeFlavors.MACH3
-		else:
-			return GcodeFlavors.REPRAP
+	if "reprap" in value and ("volume" in value or "volumatric" in value):
+		return GcodeFlavors.REPRAP_VOLUME
+	elif "ultigcode" in value:
+		return GcodeFlavors.ULTIGCODE
+	elif "makerbot" in value:
+		return GcodeFlavors.MAKERBOT
+	elif "bfb" in value:
+		return GcodeFlavors.BFB
+	elif "mach3" in value:
+		return GcodeFlavors.MACH3
+	else:
+		return GcodeFlavors.REPRAP

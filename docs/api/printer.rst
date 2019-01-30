@@ -4,12 +4,6 @@
 Printer operations
 ******************
 
-.. warning::
-
-   This part of the API is still heavily in development, especially anything that has to do with temperature control.
-   If you happen to want to develop against it, you should drop me an email to make sure I can give you a heads-up when
-   something changes.
-
 .. contents::
 
 Printer control is mostly achieved through the use of commands, issued to resources reflecting components of the
@@ -25,7 +19,8 @@ Tool
   See :ref:`sec-api-printer-toolcommand`.
 Bed
   Bed commands allow setting the temperature and temperature offset for the printer's heated bed. Querying the
-  corresponding resource returns temperature information including an optional history.
+  corresponding resource returns temperature information including an optional history. Note that Bed commands
+  are only available if the currently selected printer profile has a heated bed.
   See :ref:`sec-api-printer-bedcommand`.
 SD card
   SD commands allow initialization, refresh and release of the printer's SD card (if available). Querying the
@@ -33,6 +28,29 @@ SD card
   See :ref:`sec-api-printer-sdcommand`.
 
 Besides that, OctoPrint also provides a :ref:`full state report of the printer <sec-api-printer-state>`.
+
+.. note::
+
+   You might be wondering why all command responses below only return a ``204`` with an empty body instead of
+   the output of the just sent commands. There are two reasons for this.
+
+   OctoPrint's internal webserver is single threaded and can only handle one request at a time. This is
+   not a problem generally since asynchronous programming allows to just have one request which is waiting for
+   data from a long running backend operation to sleep while handling other requests. The internal framework
+   used for providing the REST API though, Flask, is based on WSGI, which is synchronous in nature. This means
+   that it is impossible to wait in a non blocking wait while handling a request on the REST API. So in order to
+   return the response of a command sent to the printer, the single thread of the webserver would have to be blocked
+   by the API while the response wasn't available yet. Which in turn would mean that the whole web server would
+   stop responding while waiting for the printer to reply, which, depending on the command in question (e.g. homing)
+   can take a long while. That would be a bad idea.
+
+   The second reason is that thanks to a large number of firmwares out there having a `particular bug <https://github.com/MarlinFirmware/Marlin/commit/acc0e7527914948656ccabba35f7faedc94ef885>`_
+   that makes it impossible to track the output of sent commands, identifying the correct response to a given
+   sent command is pretty much hit-and-miss. That situation gets even worse considering that it's next to impossible
+   to distinguish firmware versions which have that bug from firmware versions which don't have it.
+
+   Hence OctoPrint currently doesn't offer any synchronous way of retrieving the output of responses from the printer.
+   If you need the printer's serial communication, you'll need to subscribe to :ref:`push updates <sec-api-push>`.
 
 .. _sec-api-printer-state:
 
@@ -131,6 +149,8 @@ Retrieve the current printer state
             "operational": true,
             "paused": false,
             "printing": false,
+            "cancelling": false,
+            "pausing": false,
             "sdReady": true,
             "error": false,
             "ready": true,
@@ -161,6 +181,8 @@ Retrieve the current printer state
             "operational": true,
             "paused": false,
             "printing": false,
+            "cancelling": false,
+            "pausing": false,
             "sdReady": true,
             "error": false,
             "ready": true,
@@ -190,9 +212,14 @@ Issue a print head command
    jog
      Jogs the print head (relatively) by a defined amount in one or more axes. Additional parameters are:
 
-     * ``x``: Optional. Amount to jog print head on x axis, must be a valid number corresponding to the distance to travel in mm.
-     * ``y``: Optional. Amount to jog print head on y axis, must be a valid number corresponding to the distance to travel in mm.
-     * ``z``: Optional. Amount to jog print head on z axis, must be a valid number corresponding to the distance to travel in mm.
+     * ``x``: Optional. Amount/coordinate to jog print head on x axis, must be a valid number corresponding to the distance to travel in mm.
+     * ``y``: Optional. Amount/coordinate to jog print head on y axis, must be a valid number corresponding to the distance to travel in mm.
+     * ``z``: Optional. Amount/coordinate to jog print head on z axis, must be a valid number corresponding to the distance to travel in mm.
+     * ``absolute``: Optional. Boolean value specifying whether to move relative to current position (provided
+       axes values are relative amounts) or to absolute position (provided axes values are coordinates)
+     * ``speed``: Optional. Speed at which to move. If not provided, minimum speed for all selected axes from printer
+       profile will be used. If provided but ``false``, no speed parameter will be appended to the command. Otherwise
+       interpreted as an integer signifying the speed in mm/min, to append to the command.
 
    home
      Homes the print head in all of the given axes. Additional parameters are:
@@ -200,14 +227,16 @@ Issue a print head command
      * ``axes``: A list of axes which to home, valid values are one or more of ``x``, ``y``, ``z``.
 
    feedrate
-     Changes the feedrate factor to apply to the movement's of the axes.
+     Changes the feedrate factor to apply to the movements of the axes.
 
-     * ``factor``: The new factor, percentage as integer or float (percentage divided by 100) between 50 and 200%.
+     * ``factor``: The new factor, percentage between 50 and 200% as integer (``50`` to ``200``) or float (``0.5`` to ``2.0``).
 
    All of these commands except ``feedrate`` may only be sent if the printer is currently operational and not printing.
    Otherwise a :http:statuscode:`409` is returned.
 
    Upon success, a status code of :http:statuscode:`204` and an empty body is returned.
+
+   Requires user rights.
 
    **Example Jog Request**
 
@@ -251,9 +280,9 @@ Issue a print head command
 
       HTTP/1.1 204 No Content
 
-   **Example feed rate request**
+   **Example feed rate request (1/2)**
 
-   Set the feed rate factor to 105%.
+   Set the feed rate factor to 105% using an integer argument.
 
    .. sourcecode:: http
 
@@ -265,6 +294,26 @@ Issue a print head command
       {
         "command": "feedrate",
         "factor": 105
+      }
+
+   .. sourcecode:: http
+
+      HTTP/1.1 204 No Content
+
+   **Example feed rate request (2/2)**
+
+   Set the feed rate factor to 105% using a float argument.
+
+   .. sourcecode:: http
+
+      POST /api/printer/printhead HTTP/1.1
+      Host: example.com
+      Content-Type: application/json
+      X-Api-Key: abcdef...
+
+      {
+        "command": "feedrate",
+        "factor": 1.05
       }
 
    .. sourcecode:: http
@@ -313,16 +362,20 @@ Issue a tool command
      Extrudes the given amount of filament from the currently selected tool. Additional parameters:
 
      * ``amount``: The amount of filament to extrude in mm. May be negative to retract.
+     * ``speed``: Optional. Speed at which to extrude. If not provided, maximum speed for E axis from printer
+       profile will be used. Otherwise interpreted as an integer signifying the speed in mm/min, to append to the command.
 
    flowrate
      Changes the flow rate factor to apply to extrusion of the tool.
 
-     * ``factor``: The new factor, percentage as integer or float (percentage divided by 100) between 75 and 125%.
+     * ``factor``: The new factor, percentage between 75 and 125% as integer (``75`` to ``125``) or float (``0.75`` to ``1.25``).
 
    All of these commands may only be sent if the printer is currently operational and -- in case of ``select`` and
    ``extrude`` -- not printing. Otherwise a :http:statuscode:`409` is returned.
 
    Upon success, a status code of :http:statuscode:`204` and an empty body is returned.
+
+   Requires user rights.
 
    **Example Target Temperature Request**
 
@@ -430,9 +483,9 @@ Issue a tool command
 
       HTTP/1.1 204 No Content
 
-   **Example flow rate request**
+   **Example flow rate request (1/2)**
 
-   Set the flow rate factor to 95%.
+   Set the flow rate factor to 95% using an integer attribute.
 
    .. sourcecode:: http
 
@@ -444,6 +497,26 @@ Issue a tool command
       {
         "command": "flowrate",
         "factor": 95
+      }
+
+   .. sourcecode:: http
+
+      HTTP/1.1 204 No Content
+
+   **Example flow rate request (2/2)**
+
+   Set the flow rate factor to 95% using a float attribute.
+
+   .. sourcecode:: http
+
+      POST /api/printer/tool HTTP/1.1
+      Host: example.com
+      Content-Type: application/json
+      X-Api-Key: abcdef...
+
+      {
+        "command": "flowrate",
+        "factor": 0.95
       }
 
    .. sourcecode:: http
@@ -564,6 +637,11 @@ Issue a bed command
 
    Upon success, a status code of :http:statuscode:`204` and an empty body is returned.
 
+   If no heated bed is configured for the currently selected printer profile, the resource will return
+   an :http:statuscode:`409`.
+
+   Requires user rights.
+
    **Example Target Temperature Request**
 
    Set the target temperature for the printer's heated bed to 75°C.
@@ -610,7 +688,8 @@ Issue a bed command
    :statuscode 204: No error
    :statuscode 400: If ``target`` or ``offset`` is not a valid number or outside of the supported range, or if the
                     request is otherwise invalid.
-   :statuscode 409: If the printer is not operational.
+   :statuscode 409: If the printer is not operational or the selected printer profile
+                    does not have a heated bed.
 
 .. _sec-api-printer-bedstate:
 
@@ -626,6 +705,9 @@ Retrieve the current bed state
    amount of returned history data points can be limited using the ``limit`` query parameter.
 
    Returns a :http:statuscode:`200` with a Temperature Response in the body upon success.
+
+   If no heated bed is configured for the currently selected printer profile, the resource will return
+   an :http:statuscode:`409`.
 
    .. note::
       If you want both tool and bed temperature information at the same time, take a look at
@@ -675,7 +757,8 @@ Retrieve the current bed state
    :query limit:    If set to an integer (``n``), only the last ``n`` data points from the printer's temperature history
                     will be returned. Will be ignored if ``history`` is not enabled.
    :statuscode 200: No error
-   :statuscode 409: If the printer is not operational.
+   :statuscode 409: If the printer is not operational or the selected printer profile
+                    does not have a heated bed.
 
 .. _sec-api-printer-sdcommand:
 
@@ -690,7 +773,7 @@ Issue an SD command
 
    init
      Initializes the printer's SD card, making it available for use. This also includes an initial retrieval of the
-     list of files currently stored on the SD card, so after issueing that command a :ref:`retrieval of the files
+     list of files currently stored on the SD card, so after issuing that command a :ref:`retrieval of the files
      on SD card <sec-api-fileops-retrievelocation>` will return a successful result.
 
      .. note::
@@ -707,6 +790,8 @@ Issue an SD command
      if the card has not been initialized yet (see the ``init`` command and :ref:`SD state <sec-api-printer-sdstate>`).
 
    Upon success, a status code of :http:statuscode:`204` and an empty body is returned.
+
+   Requires user rights.
 
    **Example Init Request**
 
@@ -820,6 +905,8 @@ Send an arbitrary command to the printer
 
    If successful returns a :http:statuscode:`204` and an empty body.
 
+   Requires user rights.
+
    **Example for sending a single command**
 
    .. sourcecode:: http
@@ -856,15 +943,15 @@ Send an arbitrary command to the printer
    .. sourcecode:: http
 
       HTTP/1.1 204 No Content
-   
+
    :json string command:  Single command to send to the printer, mutually exclusive with ``commands``.
    :json string commands: List of commands to send to the printer, mutually exclusive with ``command``.
    :statuscode 204:       No error
 
 .. _sec-api-printer-datamodel:
 
-Datamodel
-=========
+Data model
+==========
 
 .. _sec-api-printer-datamodel-fullstate:
 
@@ -913,7 +1000,8 @@ Temperature State
    * - ``bed``
      - 0..1
      - :ref:`Temperature Data <sec-api-datamodel-printer-tempdata>`
-     - Current temperature stats for the printer's heated bed. Not included if querying only tool state.
+     - Current temperature stats for the printer's heated bed. Not included if querying only tool state or if
+       the currently selected printer profile does not have a heated bed.
    * - ``history``
      - 0..1
      - List of :ref:`Historic Temperature Datapoint <sec-api-datamodel-printer-temphistory>`

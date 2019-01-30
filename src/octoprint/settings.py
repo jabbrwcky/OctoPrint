@@ -17,7 +17,7 @@ of various types and the configuration file itself.
    :undoc-members:
 """
 
-from __future__ import absolute_import
+from __future__ import absolute_import, division, print_function
 
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = 'GNU Affero General Public License http://www.gnu.org/licenses/agpl.html'
@@ -26,11 +26,24 @@ __copyright__ = "Copyright (C) 2014 The OctoPrint Project - Released under terms
 import sys
 import os
 import yaml
+import yaml.parser
 import logging
 import re
 import uuid
+import copy
+import time
 
-from octoprint.util import atomic_write
+# noinspection PyCompatibility
+from builtins import bytes
+# noinspection PyCompatibility
+from past.builtins import basestring
+
+try:
+	from collections import ChainMap
+except ImportError:
+	from chainmap import ChainMap
+
+from octoprint.util import atomic_write, is_hidden_path, dict_merge, CaseInsensitiveSet
 
 _APPNAME = "OctoPrint"
 
@@ -46,7 +59,7 @@ def settings(init=False, basedir=None, configfile=None):
 	        (False, default). If this is set to True and the plugin manager has already been initialized, a :class:`ValueError`
 	        will be raised. The same will happen if the plugin manager has not yet been initialized and this is set to
 	        False.
-	    basedir (str): Path of the base directoy for all of OctoPrint's settings, log files, uploads etc. If not set
+	    basedir (str): Path of the base directory for all of OctoPrint's settings, log files, uploads etc. If not set
 	        the default will be used: ``~/.octoprint`` on Linux, ``%APPDATA%/OctoPrint`` on Windows and
 	        ``~/Library/Application Support/OctoPrint`` on MacOS.
 	    configfile (str): Path of the configuration file (``config.yaml``) to work on. If not set the default will
@@ -78,32 +91,85 @@ default_settings = {
 		"autoconnect": False,
 		"log": False,
 		"timeout": {
-			"detection": 0.5,
+			"detection": 1,
 			"connection": 10,
 			"communication": 30,
+			"communicationBusy": 3,
 			"temperature": 5,
 			"temperatureTargetSet": 2,
-			"sdStatus": 1
+			"temperatureAutoreport": 2,
+			"sdStatus": 1,
+			"sdStatusAutoreport": 1,
+			"resendOk": .5,
+			"baudrateDetectionPause": 1.0,
+			"positionLogWait": 10.0,
 		},
+		"maxCommunicationTimeouts": {
+			"idle": 2,
+			"printing": 5,
+			"long": 5
+		},
+		"maxWritePasses": 5,
 		"additionalPorts": [],
 		"additionalBaudrates": [],
-		"longRunningCommands": ["G4", "G28", "G29", "G30", "G32", "M400", "M226"],
+		"longRunningCommands": ["G4", "G28", "G29", "G30", "G32", "M400", "M226", "M600"],
 		"checksumRequiringCommands": ["M110"],
 		"helloCommand": "M110 N0",
+		"disconnectOnErrors": True,
+		"ignoreErrorsFromFirmware": False,
+		"logResends": True,
+		"supportResendsWithoutOk": "detect",
+		"logPositionOnPause": True,
+		"logPositionOnCancel": False,
+		"abortHeatupOnCancel": True,
+		"waitForStartOnConnect": False,
+		"alwaysSendChecksum": False,
+		"neverSendChecksum": False,
+		"sendChecksumWithUnknownCommands": False,
+		"unknownCommandsNeedAck": False,
+		"sdRelativePath": False,
+		"sdAlwaysAvailable": False,
+		"swallowOkAfterResend": True,
+		"repetierTargetTemp": False,
+		"externalHeatupDetection": True,
+		"supportWait": True,
+		"ignoreIdenticalResends": False,
+		"identicalResendsCountdown": 7,
+		"supportFAsCommand": False,
+		"firmwareDetection": True,
+		"blockWhileDwelling": False,
+
+		"capabilities": {
+			"autoreport_temp": True,
+			"autoreport_sdstatus": True,
+			"busy_protocol": True,
+			"emergency_parser": True
+		},
+
+		# command specific flags
+		"triggerOkForM29": True,
+		"blockM0M1": True
 	},
 	"server": {
-		"host": "0.0.0.0",
+		"host": None,
 		"port": 5000,
 		"firstRun": True,
+		"startOnceInSafeMode": False,
 		"seenWizards": {},
 		"secretKey": None,
+		"heartbeat": 15 * 60, # 15 min
 		"reverseProxy": {
-			"prefixHeader": "X-Script-Name",
-			"schemeHeader": "X-Scheme",
-			"hostHeader": "X-Forwarded-Host",
-			"prefixFallback": "",
-			"schemeFallback": "",
-			"hostFallback": ""
+			"prefixHeader": None,
+			"schemeHeader": None,
+			"hostHeader": None,
+			"serverHeader": None,
+			"portHeader": None,
+			"prefixFallback": None,
+			"schemeFallback": None,
+			"hostFallback": None,
+			"serverFallback": None,
+			"portFallback": None,
+			"trustedDownstream": []
 		},
 		"uploads": {
 			"maxSize":  1 * 1024 * 1024 * 1024, # 1GB
@@ -116,14 +182,37 @@ default_settings = {
 			"systemRestartCommand": None,
 			"serverRestartCommand": None
 		},
+		"onlineCheck": {
+			"enabled": None,
+			"interval": 15 * 60, # 15 min
+			"host": "8.8.8.8",
+			"port": 53
+		},
+		"pluginBlacklist": {
+			"enabled": None,
+			"url": "https://plugins.octoprint.org/blacklist.json",
+			"ttl": 15 * 60 # 15 min
+		},
 		"diskspace": {
 			"warning": 500 * 1024 * 1024, # 500 MB
 			"critical": 200 * 1024 * 1024, # 200 MB
+		},
+		"preemptiveCache": {
+			"exceptions": [],
+			"until": 7
+		},
+		"ipCheck": {
+			"enabled": True,
+			"trustedSubnets": []
 		}
 	},
 	"webcam": {
 		"stream": None,
+		"streamRatio": "16:9",
+		"streamTimeout": 5,
 		"snapshot": None,
+		"snapshotTimeout": 5,
+		"snapshotSslValidation": True,
 		"ffmpeg": None,
 		"ffmpegThreads": 1,
 		"bitrate": "5000k",
@@ -135,8 +224,9 @@ default_settings = {
 			"type": "off",
 			"options": {},
 			"postRoll": 0,
-			"fps": 25
-		}
+			"fps": 25,
+		},
+		"cleanTmpAfterDays": 7
 	},
 	"gcodeViewer": {
 		"enabled": True,
@@ -144,25 +234,20 @@ default_settings = {
 		"sizeThreshold": 20 * 1024 * 1024, # 20MB
 	},
 	"gcodeAnalysis": {
-		"maxExtruders": 10
+		"maxExtruders": 10,
+		"throttle_normalprio": 0.01,
+		"throttle_highprio": 0.0,
+		"throttle_lines": 100
 	},
 	"feature": {
 		"temperatureGraph": True,
-		"waitForStartOnConnect": False,
-		"alwaysSendChecksum": False,
-		"neverSendChecksum": False,
-		"sendChecksumWithUnknownCommands": False,
-		"unknownCommandsNeedAck": False,
 		"sdSupport": True,
-		"sdAlwaysAvailable": False,
-		"swallowOkAfterResend": True,
-		"repetierTargetTemp": False,
-		"externalHeatupDetection": True,
-		"supportWait": True,
 		"keyboardControl": True,
 		"pollWatched": False,
-		"ignoreIdenticalResends": False,
-		"identicalResendsCountdown": 7
+		"modelSizeDetection": True,
+		"printCancelConfirmation": True,
+		"autoUppercaseBlacklist": ["M117", "M118"],
+		"g90InfluencesExtruder": False
 	},
 	"folder": {
 		"uploads": None,
@@ -184,11 +269,12 @@ default_settings = {
 			{"name": "ABS", "extruder" : 210, "bed" : 100 },
 			{"name": "PLA", "extruder" : 180, "bed" : 60 }
 		],
-		"cutoff": 30
+		"cutoff": 30,
+		"sendAutomatically": False,
+		"sendAutomaticallyAfter": 1,
 	},
 	"printerProfiles": {
-		"default": None,
-		"defaultProfile": {}
+		"default": None
 	},
 	"printerParameters": {
 		"pauseTriggers": [],
@@ -198,20 +284,23 @@ default_settings = {
 		"name": "",
 		"color": "default",
 		"colorTransparent": False,
+		"colorIcon": True,
 		"defaultLanguage": "_default",
+		"showFahrenheitAlso": False,
 		"components": {
 			"order": {
-				"navbar": ["settings", "systemmenu", "login"],
-				"sidebar": ["connection", "state", "files"],
+				"navbar": ["settings", "systemmenu", "plugin_announcements", "plugin_pi_support", "login"],
+				"sidebar": ["plugin_printer_safety_check", "connection", "state", "files"],
 				"tab": ["temperature", "control", "gcodeviewer", "terminal", "timelapse"],
 				"settings": [
 					"section_printer", "serial", "printerprofiles", "temperatures", "terminalfilters", "gcodescripts",
-					"section_features", "features", "webcam", "accesscontrol", "api",
-					"section_octoprint", "server", "folders", "appearance", "logs", "plugin_pluginmanager", "plugin_softwareupdate"
+					"section_features", "features", "webcam", "accesscontrol", "gcodevisualizer", "api", "plugin_appkeys",
+					"section_octoprint", "server", "folders", "appearance", "plugin_logging", "plugin_pluginmanager",
+					"plugin_softwareupdate", "plugin_announcements", "plugin_backup", "plugin_tracking", "plugin_pi_support"
 				],
 				"usersettings": ["access", "interface"],
 				"wizard": ["access"],
-				"about": ["about", "license", "thirdparty", "plugin_pluginmanager", "authors", "changelog"],
+				"about": ["about", "plugin_pi_support", "supporters", "authors", "changelog", "license", "thirdparty", "plugin_pluginmanager"],
 				"generic": []
 			},
 			"disabled": {
@@ -235,7 +324,9 @@ default_settings = {
 		"userfile": None,
 		"autologinLocal": False,
 		"localNetworks": ["127.0.0.0/8"],
-		"autologinAs": None
+		"autologinAs": None,
+		"trustBasicAuthentication": False,
+		"checkBasicAuthenticationPassword": True
 	},
 	"slicing": {
 		"enabled": True,
@@ -253,68 +344,207 @@ default_settings = {
 		"apps": {}
 	},
 	"terminalFilters": [
-		{ "name": "Suppress M105 requests/responses", "regex": "(Send: M105)|(Recv: ok (B|T\d*):)" },
-		{ "name": "Suppress M27 requests/responses", "regex": "(Send: M27)|(Recv: SD printing byte)" }
+		{ "name": "Suppress temperature messages", "regex": "(Send: (N\d+\s+)?M105)|(Recv:\s+(ok\s+)?.*(B|T\d*):\d+)" },
+		{ "name": "Suppress SD status messages", "regex": "(Send: (N\d+\s+)?M27)|(Recv: SD printing byte)|(Recv: Not SD printing)" },
+		{ "name": "Suppress wait responses", "regex": "Recv: wait"}
 	],
 	"plugins": {
 		"_disabled": []
 	},
 	"scripts": {
 		"gcode": {
-			"afterPrintCancelled": "; disable motors\nM84\n\n;disable all heaters\n{% snippet 'disable_hotends' %}\nM140 S0\n\n;disable fan\nM106 S0",
+			"afterPrintCancelled": "; disable motors\nM84\n\n;disable all heaters\n{% snippet 'disable_hotends' %}\n{% snippet 'disable_bed' %}\n;disable fan\nM106 S0",
 			"snippets": {
-				"disable_hotends": "{% for tool in range(printer_profile.extruder.count) %}M104 T{{ tool }} S0\n{% endfor %}"
+				"disable_hotends": "{% if printer_profile.extruder.sharedNozzle %}M104 T0 S0\n{% else %}{% for tool in range(printer_profile.extruder.count) %}M104 T{{ tool }} S0\n{% endfor %}{% endif %}",
+				"disable_bed": "{% if printer_profile.heatedBed %}M140 S0\n{% endif %}"
 			}
+		}
+	},
+	"estimation": {
+		"printTime": {
+			"statsWeighingUntil": 0.5,
+			"validityRange": 0.15,
+			"forceDumbFromPercent": 0.3,
+			"forceDumbAfterMin": 30,
+			"stableThreshold": 60
 		}
 	},
 	"devel": {
 		"stylesheet": "css",
 		"cache": {
-			"enabled": True
+			"enabled": True,
+			"preemptive": True
 		},
 		"webassets": {
-			"minify": False,
 			"bundle": True,
 			"clean_on_startup": True
 		},
+		"useFrozenDictForPrinterState": True,
 		"virtualPrinter": {
 			"enabled": False,
 			"okAfterResend": False,
 			"forceChecksum": False,
-			"okWithLinenumber": False,
 			"numExtruders": 1,
+			"pinnedExtruders": None,
 			"includeCurrentToolInTemps": True,
-			"movementSpeed": {
-				"x": 6000,
-				"y": 6000,
-				"z": 200,
-				"e": 300
-			},
+			"includeFilenameInOpened": True,
 			"hasBed": True,
 			"repetierStyleTargetTemperature": False,
-			"repetierStyleResends": False,
 			"okBeforeCommandOutput": False,
 			"smoothieTemperatureReporting": False,
+			"reprapfwM114": False,
 			"extendedSdFileList": False,
 			"throttle": 0.01,
-			"waitOnLongMoves": False,
-			"rxBuffer": 64,
-			"txBuffer": 40,
-			"commandBuffer": 4,
 			"sendWait": True,
 			"waitInterval": 1.0,
-			"supportM112": True
+			"rxBuffer": 64,
+			"commandBuffer": 4,
+			"supportM112": True,
+			"echoOnM117": True,
+			"brokenM29": True,
+			"brokenResend": False,
+			"supportF": False,
+			"firmwareName": "Virtual Marlin 1.0",
+			"sharedNozzle": False,
+			"sendBusy": False,
+			"busyInterval": 2.0,
+			"simulateReset": True,
+			"resetLines": ['start', 'Marlin: Virtual Marlin!', '\x80', 'SD card ok'],
+			"preparedOks": [],
+			"okFormatString": "ok",
+			"m115FormatString": "FIRMWARE_NAME:{firmware_name} PROTOCOL_VERSION:1.0",
+			"m115ReportCapabilities": True,
+			"capabilities": {
+				"AUTOREPORT_TEMP": True,
+				"AUTOREPORT_SD_STATUS": True,
+				"EMERGENCY_PARSER": True
+			},
+			"m114FormatString": "X:{x} Y:{y} Z:{z} E:{e[current]} Count: A:{a} B:{b} C:{c}",
+			"ambientTemperature": 21.3,
+			"errors": {
+				"checksum_mismatch": "Checksum mismatch",
+				"checksum_missing": "Missing checksum",
+				"lineno_mismatch": "expected line {} got {}",
+				"lineno_missing": "No Line Number with checksum, Last Line: {}",
+				"maxtemp": "MAXTEMP triggered!",
+				"mintemp": "MINTEMP triggered!",
+				"command_unknown": "Unknown command {}"
+			}
 		}
 	}
 }
 """The default settings of the core application."""
 
-valid_boolean_trues = [True, "true", "yes", "y", "1"]
+valid_boolean_trues = CaseInsensitiveSet(True, "true", "yes", "y", "1", 1)
 """ Values that are considered to be equivalent to the boolean ``True`` value, used for type conversion in various places."""
 
 
 class NoSuchSettingsPath(BaseException):
 	pass
+
+
+class InvalidSettings(BaseException):
+	def __init__(self, message, line=None, column=None, details=None):
+		self.message = message
+		self.line = line
+		self.column = column
+		self.details = details
+
+
+class HierarchicalChainMap(ChainMap):
+
+	def deep_dict(self, root=None):
+		if root is None:
+			root = self
+
+		result = dict()
+		for key, value in root.items():
+			if isinstance(value, dict):
+				result[key] = self.deep_dict(root=self.__class__._get_next(key, root))
+			else:
+				result[key] = value
+		return result
+
+	def has_path(self, path, only_local=False, only_defaults=False):
+		if only_defaults:
+			current = self.parents
+		elif only_local:
+			current = self.__class__(self.maps[0])
+		else:
+			current = self
+
+		try:
+			for key in path[:-1]:
+				value = current[key]
+				if isinstance(value, dict):
+					current = self.__class__._get_next(key, current, only_local=only_local)
+				else:
+					return False
+			return path[-1] in current
+		except KeyError:
+			return False
+
+	def get_by_path(self, path, only_local=False, only_defaults=False):
+		if only_defaults:
+			current = self.parents
+		elif only_local:
+			current = self.__class__(self.maps[0])
+		else:
+			current = self
+
+		for key in path[:-1]:
+			value = current[key]
+			if isinstance(value, dict):
+				current = self.__class__._get_next(key, current, only_local=only_local)
+			else:
+				raise KeyError(key)
+
+		return current[path[-1]]
+
+	def set_by_path(self, path, value):
+		current = self
+
+		for key in path[:-1]:
+			if key not in current.maps[0]:
+				current.maps[0][key] = dict()
+			if not isinstance(current[key], dict):
+				raise KeyError(key)
+			current = self.__class__._hierarchy_for_key(key, current)
+
+		current[path[-1]] = value
+
+	def del_by_path(self, path):
+		if not path:
+			raise ValueError("Invalid path")
+
+		current = self
+
+		for key in path[:-1]:
+			if not isinstance(current[key], dict):
+				raise KeyError(key)
+			current = self.__class__._hierarchy_for_key(key, current)
+
+		del current[path[-1]]
+
+
+	@classmethod
+	def _hierarchy_for_key(cls, key, chain):
+		wrapped_mappings = list()
+		for mapping in chain.maps:
+			if key in mapping and mapping[key] is not None:
+				wrapped_mappings.append(mapping[key])
+			else:
+				wrapped_mappings.append(dict())
+		return HierarchicalChainMap(*wrapped_mappings)
+
+	@classmethod
+	def _get_next(cls, key, node, only_local=False):
+		if isinstance(node, dict):
+			return node[key]
+		elif only_local and not key in node.maps[0]:
+			raise KeyError(key)
+		else:
+			return cls._hierarchy_for_key(key, node)
 
 
 class Settings(object):
@@ -374,8 +604,13 @@ class Settings(object):
 
 		self._basedir = None
 
+		assert(isinstance(default_settings, dict))
+
+		self._map = HierarchicalChainMap(dict(), default_settings)
+
 		self._config = None
 		self._dirty = False
+		self._dirty_time = 0
 		self._mtime = None
 
 		self._get_preprocessors = dict(
@@ -391,11 +626,13 @@ class Settings(object):
 			self._configfile = os.path.join(self._basedir, "config.yaml")
 		self.load(migrate=True)
 
-		if self.get(["api", "key"]) is None:
-			self.set(["api", "key"], ''.join('%02X' % ord(z) for z in uuid.uuid4().bytes))
-			self.save(force=True)
+		apikey = self.get(["api", "key"])
+		if not apikey or apikey == "n/a":
+			self.generateApiKey()
 
 		self._script_env = self._init_script_templating()
+
+		self.sanity_check_folders(folders=["logs", ])
 
 	def _init_basedir(self, basedir):
 		if basedir is not None:
@@ -404,7 +641,18 @@ class Settings(object):
 			self._basedir = _default_basedir(_APPNAME)
 
 		if not os.path.isdir(self._basedir):
-			os.makedirs(self._basedir)
+			try:
+				os.makedirs(self._basedir)
+			except:
+				self._logger.fatal("Could not create basefolder at {}. This is a fatal error, OctoPrint "
+				                   "can't run without a writable base folder.".format(self._basedir), exc_info=1)
+				raise
+
+	def sanity_check_folders(self, folders=None):
+		if folders is None:
+			folders = default_settings["folder"].keys()
+		for folder in folders:
+			self.getBaseFolder(folder, check_writable=True, deep_check_writable=True, log_error=True)
 
 	def _get_default_folder(self, type):
 		folder = default_settings["folder"][type]
@@ -413,9 +661,11 @@ class Settings(object):
 		return folder
 
 	def _init_script_templating(self):
-		from jinja2 import Environment, BaseLoader, FileSystemLoader, ChoiceLoader, TemplateNotFound
-		from jinja2.nodes import Include, Const
+		from jinja2 import Environment, BaseLoader, ChoiceLoader, TemplateNotFound
+		from jinja2.nodes import Include
 		from jinja2.ext import Extension
+
+		from octoprint.util.jinja import FilteredFileSystemLoader
 
 		class SnippetExtension(Extension):
 			tags = {"snippet"}
@@ -505,10 +755,14 @@ class Settings(object):
 				else:
 					return template
 
-		file_system_loader = FileSystemLoader(self.getBaseFolder("scripts"))
+		path_filter = lambda path: not is_hidden_path(path)
+		file_system_loader = FilteredFileSystemLoader(self.getBaseFolder("scripts"),
+		                                              path_filter=path_filter)
 		settings_loader = SettingsScriptLoader(self)
 		choice_loader = ChoiceLoader([file_system_loader, settings_loader])
-		select_loader = SelectLoader(choice_loader, dict(bundled=settings_loader, file=file_system_loader))
+		select_loader = SelectLoader(choice_loader,
+		                             dict(bundled=settings_loader,
+		                                  file=file_system_loader))
 		return RelEnvironment(loader=select_loader, extensions=[SnippetExtension])
 
 	def _get_script_template(self, script_type, name, source=False):
@@ -556,8 +810,7 @@ class Settings(object):
 
 	@property
 	def effective(self):
-		import octoprint.util
-		return octoprint.util.dict_merge(default_settings, self._config)
+		return self._map.deep_dict()
 
 	@property
 	def effective_yaml(self):
@@ -568,55 +821,156 @@ class Settings(object):
 	def effective_hash(self):
 		import hashlib
 		hash = hashlib.md5()
-		hash.update(repr(self.effective))
+		hash.update(self.effective_yaml)
 		return hash.hexdigest()
+
+	@property
+	def config_yaml(self):
+		import yaml
+		return yaml.safe_dump(self._config)
 
 	@property
 	def config_hash(self):
 		import hashlib
 		hash = hashlib.md5()
-		hash.update(repr(self._config))
+		hash.update(self.config_yaml)
 		return hash.hexdigest()
+
+	@property
+	def _config(self):
+		return self._map.maps[0]
+
+	@_config.setter
+	def _config(self, value):
+		self._map.maps[0] = value
+
+	@property
+	def _overlay_maps(self):
+		if len(self._map.maps) > 2:
+			return self._map.maps[1:-1]
+		else:
+			return []
+
+	@property
+	def _default_map(self):
+		return self._map.maps[-1]
+
+	@property
+	def last_modified(self):
+		"""
+		Returns:
+		    (int) The last modification time of the configuration file.
+		"""
+		stat = os.stat(self._configfile)
+		return stat.st_mtime
+
+	@property
+	def last_modified_or_made_dirty(self):
+		return max(self.last_modified, self._dirty_time)
 
 	#~~ load and save
 
 	def load(self, migrate=False):
 		if os.path.exists(self._configfile) and os.path.isfile(self._configfile):
 			with open(self._configfile, "r") as f:
-				self._config = yaml.safe_load(f)
-				self._mtime = self.last_modified
+				try:
+					self._config = yaml.safe_load(f)
+					self._mtime = self.last_modified
+
+				except yaml.YAMLError as e:
+					details = e.message
+
+					if hasattr(e, "problem_mark"):
+						line = e.problem_mark.line
+						column = e.problem_mark.column
+					else:
+						line = None
+						column = None
+
+					raise InvalidSettings("Invalid YAML file: {}".format(self._configfile),
+					                      details=details,
+					                      line=line,
+					                      column=column)
+
+				except:
+					raise
+
 		# changed from else to handle cases where the file exists, but is empty / 0 bytes
-		if not self._config:
-			self._config = {}
+		if not self._config or not isinstance(self._config, dict):
+			self._config = dict()
 
 		if migrate:
 			self._migrate_config()
 
-	def _migrate_config(self):
+	def load_overlay(self, overlay, migrate=True):
+		config = None
+
+		if callable(overlay):
+			try:
+				overlay = overlay(self)
+			except:
+				self._logger.exception("Error loading overlay from callable")
+				return
+
+		if isinstance(overlay, basestring):
+			if os.path.exists(overlay) and os.path.isfile(overlay):
+				with open(overlay, "r") as f:
+					config = yaml.safe_load(f)
+		elif isinstance(overlay, dict):
+			config = overlay
+		else:
+			raise ValueError("Overlay must be either a path to a yaml file or a dictionary")
+
+		if not isinstance(config, dict):
+			raise ValueError("Configuration data must be a dict but is a {}".format(config.__class__))
+
+		if migrate:
+			self._migrate_config(config)
+		return config
+
+	def add_overlay(self, overlay, at_end=False):
+		if at_end:
+			pos = len(self._map.maps) - 1
+			self._map.maps.insert(pos, overlay)
+		else:
+			self._map.maps.insert(1, overlay)
+
+	def _migrate_config(self, config=None, persist=False):
+		if config is None:
+			config = self._config
+			persist = True
+
 		dirty = False
 
 		migrators = (
 			self._migrate_event_config,
 			self._migrate_reverse_proxy_config,
 			self._migrate_printer_parameters,
-			self._migrate_gcode_scripts
+			self._migrate_gcode_scripts,
+			self._migrate_core_system_commands,
+			self._migrate_serial_features,
+			self._migrate_resend_without_ok,
+			self._migrate_string_temperature_profile_values
 		)
 
 		for migrate in migrators:
-			dirty = migrate() or dirty
-		if dirty:
+			dirty = migrate(config) or dirty
+
+		if dirty and persist:
 			self.save(force=True)
 
-	def _migrate_gcode_scripts(self):
+	def _migrate_gcode_scripts(self, config):
 		"""
 		Migrates an old development version of gcode scripts to the new template based format.
+
+		Added in 1.2.0
 		"""
 
 		dirty = False
-		if "scripts" in self._config:
-			if "gcode" in self._config["scripts"]:
-				if "templates" in self._config["scripts"]["gcode"]:
-					del self._config["scripts"]["gcode"]["templates"]
+		if "scripts" in config:
+			if "gcode" in config["scripts"]:
+				if "templates" in config["scripts"]["gcode"]:
+					del config["scripts"]["gcode"]["templates"]
 
 				replacements = dict(
 					disable_steppers="M84",
@@ -625,51 +979,56 @@ class Settings(object):
 					disable_fan="M106 S0"
 				)
 
-				for name, script in self._config["scripts"]["gcode"].items():
+				for name, script in config["scripts"]["gcode"].items():
 					self.saveScript("gcode", name, script.format(**replacements))
-			del self._config["scripts"]
+			del config["scripts"]
 			dirty = True
 		return dirty
 
-	def _migrate_printer_parameters(self):
+	def _migrate_printer_parameters(self, config):
 		"""
 		Migrates the old "printer > parameters" data structure to the new printer profile mechanism.
+
+		Added in 1.2.0
 		"""
-		default_profile = self._config["printerProfiles"]["defaultProfile"] if "printerProfiles" in self._config and "defaultProfile" in self._config["printerProfiles"] else dict()
+		default_profile = config["printerProfiles"]["defaultProfile"] if "printerProfiles" in config and "defaultProfile" in config["printerProfiles"] else dict()
 		dirty = False
 
-		if "printerParameters" in self._config:
-			printer_parameters = self._config["printerParameters"]
+		if "printerParameters" in config:
+			printer_parameters = config["printerParameters"]
 
 			if "movementSpeed" in printer_parameters or "invertAxes" in printer_parameters:
+				dirty = True
 				default_profile["axes"] = dict(x=dict(), y=dict(), z=dict(), e=dict())
 				if "movementSpeed" in printer_parameters:
 					for axis in ("x", "y", "z", "e"):
 						if axis in printer_parameters["movementSpeed"]:
 							default_profile["axes"][axis]["speed"] = printer_parameters["movementSpeed"][axis]
-					del self._config["printerParameters"]["movementSpeed"]
+					del config["printerParameters"]["movementSpeed"]
 				if "invertedAxes" in printer_parameters:
 					for axis in ("x", "y", "z", "e"):
 						if axis in printer_parameters["invertedAxes"]:
 							default_profile["axes"][axis]["inverted"] = True
-					del self._config["printerParameters"]["invertedAxes"]
+					del config["printerParameters"]["invertedAxes"]
 
 			if "numExtruders" in printer_parameters or "extruderOffsets" in printer_parameters:
+				dirty = True
 				if not "extruder" in default_profile:
 					default_profile["extruder"] = dict()
 
 				if "numExtruders" in printer_parameters:
 					default_profile["extruder"]["count"] = printer_parameters["numExtruders"]
-					del self._config["printerParameters"]["numExtruders"]
+					del config["printerParameters"]["numExtruders"]
 				if "extruderOffsets" in printer_parameters:
 					extruder_offsets = []
 					for offset in printer_parameters["extruderOffsets"]:
 						if "x" in offset and "y" in offset:
 							extruder_offsets.append((offset["x"], offset["y"]))
 					default_profile["extruder"]["offsets"] = extruder_offsets
-					del self._config["printerParameters"]["extruderOffsets"]
+					del config["printerParameters"]["extruderOffsets"]
 
 			if "bedDimensions" in printer_parameters:
+				dirty = True
 				bed_dimensions = printer_parameters["bedDimensions"]
 				if not "volume" in default_profile:
 					default_profile["volume"] = dict()
@@ -684,49 +1043,51 @@ class Settings(object):
 						default_profile["volume"]["width"] = bed_dimensions["x"]
 					if "y" in bed_dimensions:
 						default_profile["volume"]["depth"] = bed_dimensions["y"]
-				del self._config["printerParameters"]["bedDimensions"]
-
-			dirty = True
+				del config["printerParameters"]["bedDimensions"]
 
 		if dirty:
-			if not "printerProfiles" in self._config:
-				self._config["printerProfiles"] = dict()
-			self._config["printerProfiles"]["defaultProfile"] = default_profile
+			if not "printerProfiles" in config:
+				config["printerProfiles"] = dict()
+			config["printerProfiles"]["defaultProfile"] = default_profile
 		return dirty
 
-	def _migrate_reverse_proxy_config(self):
+	def _migrate_reverse_proxy_config(self, config):
 		"""
 		Migrates the old "server > baseUrl" and "server > scheme" configuration entries to
 		"server > reverseProxy > prefixFallback" and "server > reverseProxy > schemeFallback".
+
+		Added in 1.2.0
 		"""
-		if "server" in self._config.keys() and ("baseUrl" in self._config["server"] or "scheme" in self._config["server"]):
+		if "server" in config.keys() and ("baseUrl" in config["server"] or "scheme" in config["server"]):
 			prefix = ""
-			if "baseUrl" in self._config["server"]:
-				prefix = self._config["server"]["baseUrl"]
-				del self._config["server"]["baseUrl"]
+			if "baseUrl" in config["server"]:
+				prefix = config["server"]["baseUrl"]
+				del config["server"]["baseUrl"]
 
 			scheme = ""
-			if "scheme" in self._config["server"]:
-				scheme = self._config["server"]["scheme"]
-				del self._config["server"]["scheme"]
+			if "scheme" in config["server"]:
+				scheme = config["server"]["scheme"]
+				del config["server"]["scheme"]
 
-			if not "reverseProxy" in self._config["server"] or not isinstance(self._config["server"]["reverseProxy"], dict):
-				self._config["server"]["reverseProxy"] = dict()
+			if not "reverseProxy" in config["server"] or not isinstance(config["server"]["reverseProxy"], dict):
+				config["server"]["reverseProxy"] = dict()
 			if prefix:
-				self._config["server"]["reverseProxy"]["prefixFallback"] = prefix
+				config["server"]["reverseProxy"]["prefixFallback"] = prefix
 			if scheme:
-				self._config["server"]["reverseProxy"]["schemeFallback"] = scheme
+				config["server"]["reverseProxy"]["schemeFallback"] = scheme
 			self._logger.info("Migrated reverse proxy configuration to new structure")
 			return True
 		else:
 			return False
 
-	def _migrate_event_config(self):
+	def _migrate_event_config(self, config):
 		"""
 		Migrates the old event configuration format of type "events > gcodeCommandTrigger" and
 		"event > systemCommandTrigger" to the new events format.
+
+		Added in 1.2.0
 		"""
-		if "events" in self._config.keys() and ("gcodeCommandTrigger" in self._config["events"] or "systemCommandTrigger" in self._config["events"]):
+		if "events" in config.keys() and ("gcodeCommandTrigger" in config["events"] or "systemCommandTrigger" in config["events"]):
 			self._logger.info("Migrating config (event subscriptions)...")
 
 			# migrate event hooks to new format
@@ -768,12 +1129,12 @@ class Settings(object):
 				return event, command
 
 			disableSystemCommands = False
-			if "systemCommandTrigger" in self._config["events"] and "enabled" in self._config["events"]["systemCommandTrigger"]:
-				disableSystemCommands = not self._config["events"]["systemCommandTrigger"]["enabled"]
+			if "systemCommandTrigger" in config["events"] and "enabled" in config["events"]["systemCommandTrigger"]:
+				disableSystemCommands = not config["events"]["systemCommandTrigger"]["enabled"]
 
 			disableGcodeCommands = False
-			if "gcodeCommandTrigger" in self._config["events"] and "enabled" in self._config["events"]["gcodeCommandTrigger"]:
-				disableGcodeCommands = not self._config["events"]["gcodeCommandTrigger"]["enabled"]
+			if "gcodeCommandTrigger" in config["events"] and "enabled" in config["events"]["gcodeCommandTrigger"]:
+				disableGcodeCommands = not config["events"]["gcodeCommandTrigger"]["enabled"]
 
 			disableAllCommands = disableSystemCommands and disableGcodeCommands
 			newEvents = {
@@ -781,8 +1142,8 @@ class Settings(object):
 				"subscriptions": []
 			}
 
-			if "systemCommandTrigger" in self._config["events"] and "subscriptions" in self._config["events"]["systemCommandTrigger"]:
-				for trigger in self._config["events"]["systemCommandTrigger"]["subscriptions"]:
+			if "systemCommandTrigger" in config["events"] and "subscriptions" in config["events"]["systemCommandTrigger"]:
+				for trigger in config["events"]["systemCommandTrigger"]["subscriptions"]:
 					if not ("event" in trigger and "command" in trigger):
 						continue
 
@@ -793,8 +1154,8 @@ class Settings(object):
 					newTrigger["event"], newTrigger["command"] = migrateEventHook(trigger["event"], trigger["command"])
 					newEvents["subscriptions"].append(newTrigger)
 
-			if "gcodeCommandTrigger" in self._config["events"] and "subscriptions" in self._config["events"]["gcodeCommandTrigger"]:
-				for trigger in self._config["events"]["gcodeCommandTrigger"]["subscriptions"]:
+			if "gcodeCommandTrigger" in config["events"] and "subscriptions" in config["events"]["gcodeCommandTrigger"]:
+				for trigger in config["events"]["gcodeCommandTrigger"]["subscriptions"]:
 					if not ("event" in trigger and "command" in trigger):
 						continue
 
@@ -806,11 +1167,159 @@ class Settings(object):
 					newTrigger["command"] = newTrigger["command"].split(",")
 					newEvents["subscriptions"].append(newTrigger)
 
-			self._config["events"] = newEvents
+			config["events"] = newEvents
 			self._logger.info("Migrated %d event subscriptions to new format and structure" % len(newEvents["subscriptions"]))
 			return True
 		else:
 			return False
+
+	def _migrate_core_system_commands(self, config):
+		"""
+		Migrates system commands for restart, reboot and shutdown as defined on OctoPi or
+		according to the official setup guide to new core system commands to remove
+		duplication.
+
+		If server commands for action is not yet set, migrates command. Otherwise only
+		deletes definition from custom system commands.
+
+		Added in 1.3.0
+		"""
+		changed = False
+
+		migration_map = dict(shutdown="systemShutdownCommand",
+		                     reboot="systemRestartCommand",
+		                     restart="serverRestartCommand")
+
+		if "system" in config and "actions" in config["system"] and isinstance(config["system"]["actions"], (list, tuple)):
+			actions = config["system"]["actions"]
+			to_delete = []
+			for index, spec in enumerate(actions):
+				action = spec.get("action")
+				command = spec.get("command")
+				if action is None or command is None:
+					continue
+
+				migrate_to = migration_map.get(action)
+				if migrate_to is not None:
+					if not "server" in config or not "commands" in config["server"] or not migrate_to in config["server"]["commands"]:
+						if not "server" in config:
+							config["server"] = dict()
+						if not "commands" in config["server"]:
+							config["server"]["commands"] = dict()
+						config["server"]["commands"][migrate_to] = command
+						self._logger.info("Migrated {} action to server.commands.{}".format(action, migrate_to))
+
+					to_delete.append(index)
+					self._logger.info("Deleting {} action from configured system commands, superseeded by server.commands.{}".format(action, migrate_to))
+
+			for index in reversed(to_delete):
+				actions.pop(index)
+				changed = True
+
+		if changed:
+			# let's make a backup of our current config, in case someone wants to roll back to an
+			# earlier version and needs to recover the former system commands for that
+			backup_path = self.backup("system_command_migration")
+			self._logger.info("Made a copy of the current config at {} to allow recovery of manual system command configuration".format(backup_path))
+
+		return changed
+
+	def _migrate_serial_features(self, config):
+		"""
+		Migrates feature flags identified as serial specific from the feature to the serial config tree and vice versa.
+
+		If a flag already exists in the target tree, only deletes the copy in the source tree.
+
+		Added in 1.3.7
+		"""
+		changed = False
+
+		FEATURE_TO_SERIAL = ("waitForStartOnConnect", "alwaysSendChecksum", "neverSendChecksum",
+		                     "sendChecksumWithUnknownCommands", "unknownCommandsNeedAck", "sdRelativePath",
+		                     "sdAlwaysAvailable", "swallowOkAfterResend", "repetierTargetTemp",
+		                     "externalHeatupDetection", "supportWait", "ignoreIdenticalResends",
+		                     "identicalResendsCountdown", "supportFAsCommand", "firmwareDetection",
+		                     "blockWhileDwelling")
+		SERIAL_TO_FEATURE = ("autoUppercaseBlacklist",)
+
+		def migrate_key(key, source, target):
+			if source in config and key in config[source]:
+				if config.get(target) is None:
+					# make sure we have a serial tree
+					config[target] = dict()
+				if key not in config[target]:
+					# only copy over if it's not there yet
+					config[target][key] = config[source][key]
+				# delete feature flag
+				del config[source][key]
+				return True
+			return False
+
+		for key in FEATURE_TO_SERIAL:
+			changed = migrate_key(key, "feature", "serial") or changed
+
+		for key in SERIAL_TO_FEATURE:
+			changed = migrate_key(key, "serial", "feature") or changed
+
+		if changed:
+			# let's make a backup of our current config, in case someone wants to roll back to an
+			# earlier version and needs a backup of their flags
+			backup_path = self.backup("serial_feature_migration")
+			self._logger.info("Made a copy of the current config at {} to allow recovery of serial feature flags".format(backup_path))
+
+		return changed
+
+	def _migrate_resend_without_ok(self, config):
+		"""
+		Migrates supportResendsWithoutOk flag from boolean to ("always", "detect", "never") value range.
+
+		True gets migrated to "always", False to "detect" (which is the new default).
+
+		Added in 1.3.7
+		"""
+		if "serial" in config and "supportResendsWithoutOk" in config["serial"] \
+				and config["serial"]["supportResendsWithoutOk"] not in ("always", "detect", "never"):
+			value = config["serial"]["supportResendsWithoutOk"]
+			if value:
+				config["serial"]["supportResendsWithoutOk"] = "always"
+			else:
+				config["serial"]["supportResendsWithoutOk"] = "detect"
+			return True
+		return False
+
+	def _migrate_string_temperature_profile_values(self, config):
+		"""
+		Migrates/fixes temperature profile wrongly saved with strings instead of ints as temperature values.
+
+		Added in 1.3.8
+		"""
+		if "temperature" in config and "profiles" in config["temperature"]:
+			profiles = config["temperature"]["profiles"]
+			if any(map(lambda x: not isinstance(x.get("extruder", 0), int) or not isinstance(x.get("bed", 0), int),
+			           profiles)):
+				result = []
+				for profile in profiles:
+					try:
+						profile["extruder"] = int(profile["extruder"])
+						profile["bed"] = int(profile["bed"])
+					except ValueError:
+						pass
+					result.append(profile)
+				config["temperature"]["profiles"] = result
+				return True
+		return False
+
+	def backup(self, suffix, path=None):
+		import shutil
+
+		if path is None:
+			path = os.path.dirname(self._configfile)
+		basename = os.path.basename(self._configfile)
+		name, ext = os.path.splitext(basename)
+
+		backup = os.path.join(path, "{}.{}{}".format(name, suffix, ext))
+		shutil.copy(self._configfile, backup)
+		return backup
 
 	def save(self, force=False):
 		if not self._dirty and not force:
@@ -818,7 +1327,7 @@ class Settings(object):
 
 		from octoprint.util import atomic_write
 		try:
-			with atomic_write(self._configfile, "wb", prefix="octoprint-config-", suffix=".yaml") as configFile:
+			with atomic_write(self._configfile, "wb", prefix="octoprint-config-", suffix=".yaml", permissions=0o600, max_permissions=0o666) as configFile:
 				yaml.safe_dump(self._config, configFile, default_flow_style=False, indent="    ", allow_unicode=True)
 				self._dirty = False
 		except:
@@ -828,74 +1337,87 @@ class Settings(object):
 			self.load()
 			return True
 
-	@property
-	def last_modified(self):
-		"""
-		Returns:
-		    int: The last modification time of the configuration file.
-		"""
-		stat = os.stat(self._configfile)
-		return stat.st_mtime
-
 	##~~ Internal getter
 
-	def _get_value(self, path, asdict=False, config=None, defaults=None, preprocessors=None, merged=False, incl_defaults=True):
-		import octoprint.util as util
+	def _get_by_path(self, path, config):
+		current = config
+		for key in path:
+			if key not in current:
+				raise NoSuchSettingsPath()
+			current = current[key]
+		return current
 
-		if len(path) == 0:
+	def _get_value(self, path, asdict=False, config=None, defaults=None, preprocessors=None, merged=False, incl_defaults=True, do_copy=True):
+		if not path:
 			raise NoSuchSettingsPath()
 
-		if config is None:
-			config = self._config
-		if defaults is None:
-			defaults = default_settings
+		if config is not None or defaults is not None:
+			if config is None:
+				config = self._config
+
+			if defaults is None:
+				defaults = dict(self._map.parents)
+
+			# mappings: provided config + any intermediary parents + provided defaults + regular defaults
+			mappings = [config] + self._overlay_maps + [defaults, self._default_map]
+			chain = HierarchicalChainMap(*mappings)
+		else:
+			chain = self._map
+
 		if preprocessors is None:
 			preprocessors = self._get_preprocessors
 
-		while len(path) > 1:
-			key = path.pop(0)
-			if key in config and key in defaults:
-				config = config[key]
-				defaults = defaults[key]
-			elif incl_defaults and key in defaults:
-				config = {}
-				defaults = defaults[key]
-			else:
-				raise NoSuchSettingsPath()
+		preprocessor = None
+		try:
+			preprocessor = self._get_by_path(path, preprocessors)
+		except NoSuchSettingsPath:
+			pass
 
-			if preprocessors and isinstance(preprocessors, dict) and key in preprocessors:
-				preprocessors = preprocessors[key]
+		parent_path = path[:-1]
+		last = path[-1]
 
-
-		k = path.pop(0)
-		if not isinstance(k, (list, tuple)):
-			keys = [k]
+		if not isinstance(last, (list, tuple)):
+			keys = [last]
 		else:
-			keys = k
+			keys = last
 
 		if asdict:
-			results = {}
+			results = dict()
 		else:
-			results = []
+			results = list()
+
 		for key in keys:
-			if key in config:
-				value = config[key]
-				if merged and key in defaults:
-					value = util.dict_merge(defaults[key], value)
-			elif incl_defaults and key in defaults:
-				value = defaults[key]
-			else:
+			try:
+				value = chain.get_by_path(parent_path + [key], only_local=not incl_defaults)
+			except KeyError:
 				raise NoSuchSettingsPath()
 
-			if preprocessors and isinstance(preprocessors, dict) and key in preprocessors and callable(preprocessors[key]):
-				value = preprocessors[key](value)
+			if isinstance(value, dict) and merged:
+				try:
+					default_value = chain.get_by_path(parent_path + [key], only_defaults=True)
+					if default_value is not None:
+						value = dict_merge(default_value, value)
+				except KeyError:
+					raise NoSuchSettingsPath()
+
+			if preprocessors is not None:
+				try:
+					preprocessor = self._get_by_path(path, preprocessors)
+				except:
+					pass
+
+				if callable(preprocessor):
+					value = preprocessor(value)
+
+			if do_copy:
+				value = copy.deepcopy(value)
 
 			if asdict:
 				results[key] = value
 			else:
 				results.append(value)
 
-		if not isinstance(k, (list, tuple)):
+		if not isinstance(last, (list, tuple)):
 			if asdict:
 				return results.values().pop()
 			else:
@@ -916,37 +1438,61 @@ class Settings(object):
 	#~~ getter
 
 	def get(self, path, **kwargs):
-		error_on_path = kwargs.get("error_on_path", False)
-		new_kwargs = dict(kwargs)
-		if "error_on_path" in new_kwargs:
-			del new_kwargs["error_on_path"]
+		error_on_path = kwargs.pop("error_on_path", False)
+		validator = kwargs.pop("validator", None)
+		fallback = kwargs.pop("fallback", None)
 
-		try:
-			return self._get_value(path, **new_kwargs)
-		except NoSuchSettingsPath:
-			if error_on_path:
-				raise
-			else:
+		def process():
+			try:
+				return self._get_value(path, **kwargs)
+			except NoSuchSettingsPath:
+				if error_on_path:
+					raise
 				return None
 
+		result = process()
+		if callable(validator) and not validator(result):
+			result = fallback
+		return result
+
 	def getInt(self, path, **kwargs):
+		minimum = kwargs.pop("min", None)
+		maximum = kwargs.pop("max", None)
+
 		value = self.get(path, **kwargs)
 		if value is None:
 			return None
 
 		try:
-			return int(value)
+			intValue = int(value)
+
+			if minimum is not None and intValue < minimum:
+				return minimum
+			elif maximum is not None and intValue > maximum:
+				return maximum
+			else:
+				return intValue
 		except ValueError:
 			self._logger.warn("Could not convert %r to a valid integer when getting option %r" % (value, path))
 			return None
 
 	def getFloat(self, path, **kwargs):
+		minimum = kwargs.pop("min", None)
+		maximum = kwargs.pop("max", None)
+
 		value = self.get(path, **kwargs)
 		if value is None:
 			return None
 
 		try:
-			return float(value)
+			floatValue = float(value)
+
+			if minimum is not None and floatValue < minimum:
+				return minimum
+			elif maximum is not None and floatValue > maximum:
+				return maximum
+			else:
+				return floatValue
 		except ValueError:
 			self._logger.warn("Could not convert %r to a valid integer when getting option %r" % (value, path))
 			return None
@@ -963,7 +1509,7 @@ class Settings(object):
 			return value.lower() in valid_boolean_trues
 		return value is not None
 
-	def getBaseFolder(self, type, create=True):
+	def getBaseFolder(self, type, create=True, allow_fallback=True, log_error=False, check_writable=True, deep_check_writable=False):
 		if type not in default_settings["folder"].keys() + ["base"]:
 			return None
 
@@ -971,14 +1517,33 @@ class Settings(object):
 			return self._basedir
 
 		folder = self.get(["folder", type])
+		default_folder = self._get_default_folder(type)
 		if folder is None:
-			folder = self._get_default_folder(type)
+			folder = default_folder
 
-		if not os.path.isdir(folder):
-			if create:
-				os.makedirs(folder)
+		try:
+			_validate_folder(folder, create=create, check_writable=check_writable, deep_check_writable=deep_check_writable, log_error=log_error)
+		except:
+			if folder != default_folder and allow_fallback:
+				if log_error:
+					self._logger.error("Invalid configured {} folder at {}, attempting to "
+					                   "fall back on default folder at {}".format(type,
+					                                                              folder,
+					                                                              default_folder))
+				_validate_folder(default_folder, create=create, check_writable=check_writable, deep_check_writable=deep_check_writable, log_error=log_error)
+				folder = default_folder
+
+				try:
+					del self._config["folder"][type]
+					if not len(self._config["folder"]):
+						del self._config["folder"]
+					self._dirty = True
+					self._dirty_time = time.time()
+					self.save()
+				except KeyError:
+					pass
 			else:
-				raise IOError("No such folder: {folder}".format(folder=folder))
+				raise
 
 		return folder
 
@@ -1007,74 +1572,108 @@ class Settings(object):
 
 	#~~ remove
 
-	def remove(self, path, config=None):
-		if config is None:
-			config = self._config
+	def remove(self, path, config=None, error_on_path=False):
+		if not path:
+			if error_on_path:
+				raise NoSuchSettingsPath()
+			return
 
-		while len(path) > 1:
-			key = path.pop(0)
-			if not isinstance(config, dict) or key not in config:
-				return
-			config = config[key]
+		if config is not None:
+			mappings = [config] + self._overlay_maps + [self._default_map]
+			chain = HierarchicalChainMap(*mappings)
+		else:
+			chain = self._map
 
-		key = path.pop(0)
-		if isinstance(config, dict) and key in config:
-			del config[key]
-		self._dirty = True
+		try:
+			chain.del_by_path(path)
+			self._dirty = True
+			self._dirty_time = time.time()
+		except KeyError:
+			if error_on_path:
+				raise NoSuchSettingsPath()
+			pass
 
 	#~~ setter
 
-	def set(self, path, value, force=False, defaults=None, config=None, preprocessors=None):
-		if len(path) == 0:
+	def set(self, path, value, force=False, defaults=None, config=None, preprocessors=None, error_on_path=False, *args, **kwargs):
+		if not path:
+			if error_on_path:
+				raise NoSuchSettingsPath()
 			return
 
 		if self._mtime is not None and self.last_modified != self._mtime:
 			self.load()
 
-		if config is None:
-			config = self._config
-		if defaults is None:
-			defaults = default_settings
+		if config is not None or defaults is not None:
+			if config is None:
+				config = self._config
+
+			if defaults is None:
+				defaults = dict(self._map.parents)
+
+			chain = HierarchicalChainMap(config, defaults)
+		else:
+			chain = self._map
+
 		if preprocessors is None:
 			preprocessors = self._set_preprocessors
 
-		while len(path) > 1:
-			key = path.pop(0)
-			if key in config.keys() and key in defaults.keys():
-				config = config[key]
-				defaults = defaults[key]
-			elif key in defaults.keys():
-				config[key] = {}
-				config = config[key]
-				defaults = defaults[key]
+		preprocessor = None
+		try:
+			preprocessor = self._get_by_path(path, preprocessors)
+		except NoSuchSettingsPath:
+			pass
+
+		if callable(preprocessor):
+			value = preprocessor(value)
+
+		try:
+			current = chain.get_by_path(path)
+		except KeyError:
+			current = None
+
+		try:
+			default_value = chain.get_by_path(path, only_defaults=True)
+		except KeyError:
+			if error_on_path:
+				raise NoSuchSettingsPath()
+			default_value = None
+
+		in_local = chain.has_path(path, only_local=True)
+		in_defaults = chain.has_path(path, only_defaults=True)
+
+		if not force and in_defaults and in_local and default_value == value:
+			try:
+				chain.del_by_path(path)
+				self._dirty = True
+				self._dirty_time = time.time()
+			except KeyError:
+				if error_on_path:
+					raise NoSuchSettingsPath()
+				pass
+		elif force or (not in_local and in_defaults and default_value != value) or (in_local and current != value):
+			if value is None and in_local:
+				chain.del_by_path(path)
 			else:
-				return
-
-			if preprocessors and isinstance(preprocessors, dict) and key in preprocessors:
-				preprocessors = preprocessors[key]
-
-		key = path.pop(0)
-
-		if preprocessors and isinstance(preprocessors, dict) and key in preprocessors and callable(preprocessors[key]):
-			value = preprocessors[key](value)
-
-		if not force and key in defaults and key in config and defaults[key] == value:
-			del config[key]
+				chain.set_by_path(path, value)
 			self._dirty = True
-		elif force or (not key in config and key in defaults and defaults[key] != value) or (key in config and config[key] != value):
-			if value is None and key in config:
-				del config[key]
-			else:
-				config[key] = value
-			self._dirty = True
+			self._dirty_time = time.time()
 
 	def setInt(self, path, value, **kwargs):
 		if value is None:
 			self.set(path, None, **kwargs)
 			return
 
+		minimum = kwargs.pop("min", None)
+		maximum = kwargs.pop("max", None)
+
 		try:
 			intValue = int(value)
+
+			if minimum is not None and intValue < minimum:
+				intValue = minimum
+			if maximum is not None and intValue > maximum:
+				intValue = maximum
 		except ValueError:
 			self._logger.warn("Could not convert %r to a valid integer when setting option %r" % (value, path))
 			return
@@ -1086,8 +1685,16 @@ class Settings(object):
 			self.set(path, None, **kwargs)
 			return
 
+		minimum = kwargs.pop("min", None)
+		maximum = kwargs.pop("max", None)
+
 		try:
 			floatValue = float(value)
+
+			if minimum is not None and floatValue < minimum:
+				floatValue = minimum
+			if maximum is not None and floatValue > maximum:
+				floatValue = maximum
 		except ValueError:
 			self._logger.warn("Could not convert %r to a valid integer when setting option %r" % (value, path))
 			return
@@ -1097,12 +1704,12 @@ class Settings(object):
 	def setBoolean(self, path, value, **kwargs):
 		if value is None or isinstance(value, bool):
 			self.set(path, value, **kwargs)
-		elif value.lower() in valid_boolean_trues:
+		elif isinstance(value, basestring) and value.lower() in valid_boolean_trues:
 			self.set(path, True, **kwargs)
 		else:
 			self.set(path, False, **kwargs)
 
-	def setBaseFolder(self, type, path, force=False):
+	def setBaseFolder(self, type, path, force=False, validate=True):
 		if type not in default_settings["folder"].keys():
 			return None
 
@@ -1113,11 +1720,16 @@ class Settings(object):
 			if not self._config["folder"]:
 				del self._config["folder"]
 			self._dirty = True
+			self._dirty_time = time.time()
 		elif (path != currentPath and path != defaultPath) or force:
+			if validate:
+				_validate_folder(path, check_writable=True, deep_check_writable=True)
+
 			if not "folder" in self._config.keys():
 				self._config["folder"] = {}
 			self._config["folder"][type] = path
 			self._dirty = True
+			self._dirty_time = time.time()
 
 	def saveScript(self, script_type, name, script):
 		script_folder = self.getBaseFolder("scripts")
@@ -1129,19 +1741,71 @@ class Settings(object):
 		path, _ = os.path.split(filename)
 		if not os.path.exists(path):
 			os.makedirs(path)
-		with atomic_write(filename, "wb") as f:
+		with atomic_write(filename, "wb", max_permissions=0o666) as f:
 			f.write(script)
+
+	def generateApiKey(self):
+		apikey = ''.join('%02X' % z for z in bytes(uuid.uuid4().bytes))
+		self.set(["api", "key"], apikey)
+		self.save(force=True)
+		return apikey
+
+	def deleteApiKey(self):
+		self.set(["api", "key"], None)
+		self.save(force=True)
+
 
 def _default_basedir(applicationName):
 	# taken from http://stackoverflow.com/questions/1084697/how-do-i-store-desktop-application-data-in-a-cross-platform-way-for-python
 	if sys.platform == "darwin":
-		from AppKit import NSSearchPathForDirectoriesInDomains
-		# http://developer.apple.com/DOCUMENTATION/Cocoa/Reference/Foundation/Miscellaneous/Foundation_Functions/Reference/reference.html#//apple_ref/c/func/NSSearchPathForDirectoriesInDomains
-		# NSApplicationSupportDirectory = 14
-		# NSUserDomainMask = 1
-		# True for expanding the tilde into a fully qualified path
-		return os.path.join(NSSearchPathForDirectoriesInDomains(14, 1, True)[0], applicationName)
+		import appdirs
+		return appdirs.user_data_dir(applicationName, "")
 	elif sys.platform == "win32":
 		return os.path.join(os.environ["APPDATA"], applicationName)
 	else:
 		return os.path.expanduser(os.path.join("~", "." + applicationName.lower()))
+
+
+def _validate_folder(folder, create=True, check_writable=True, deep_check_writable=False, log_error=False):
+	logger = logging.getLogger(__name__)
+
+	if not os.path.exists(folder):
+		if os.path.islink(folder):
+			# broken symlink, see #2644
+			raise IOError("Folder at {} appears to be a broken symlink".format(folder))
+
+		elif create:
+			# non existing, but we are allowed to create it
+			try:
+				os.makedirs(folder)
+			except:
+				if log_error:
+					logger.exception("Could not create {}".format(folder))
+				raise IOError("Folder for type {} at {} does not exist and creation failed".format(type, folder))
+
+		else:
+			# not extisting, not allowed to create it
+			raise IOError("No such folder: {}".format(folder))
+
+	elif os.path.isfile(folder):
+		# hardening against misconfiguration, see #1953
+		raise IOError("Expected a folder at {} but found a file instead".format(folder))
+
+	elif check_writable:
+		# make sure we can also write into the folder
+		error = "Folder at {} doesn't appear to be writable, please fix its permissions".format(folder)
+		if not os.access(folder, os.W_OK):
+			raise IOError(error)
+
+		elif deep_check_writable:
+			# try to write a file to the folder - on network shares that might be the only reliable way
+			# to determine whether things are *actually* writable
+			testfile = os.path.join(folder, ".testballoon.txt")
+			try:
+				with open(testfile, "wb") as f:
+					f.write("test")
+				os.remove(testfile)
+			except:
+				if log_error:
+					logger.exception("Could not write test file to {}".format(folder))
+				raise IOError(error)

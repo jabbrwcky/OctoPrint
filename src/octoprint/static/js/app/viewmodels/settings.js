@@ -5,12 +5,25 @@ $(function() {
         self.loginState = parameters[0];
         self.users = parameters[1];
         self.printerProfiles = parameters[2];
+        self.about = parameters[3];
+
+        // use this promise to do certain things once the SettingsViewModel has processed
+        // its first request
+        var firstRequest = $.Deferred();
+        self.firstRequest = firstRequest.promise();
 
         self.allViewModels = [];
 
         self.receiving = ko.observable(false);
         self.sending = ko.observable(false);
+        self.exchanging = ko.pureComputed(function() {
+            return self.receiving() || self.sending();
+        });
         self.outstanding = [];
+
+        self.active = false;
+        self.sawUpdateEventWhileActive = false;
+        self.ignoreNextUpdateEvent = false;
 
         self.settingsDialog = undefined;
         self.settings_dialog_update_detected = undefined;
@@ -19,11 +32,11 @@ $(function() {
         self.translationUploadButton = $("#settings_appearance_managelanguagesdialog_upload_start");
 
         self.translationUploadFilename = ko.observable();
-        self.invalidTranslationArchive = ko.computed(function() {
+        self.invalidTranslationArchive = ko.pureComputed(function() {
             var name = self.translationUploadFilename();
             return name !== undefined && !(_.endsWith(name.toLocaleLowerCase(), ".zip") || _.endsWith(name.toLocaleLowerCase(), ".tar.gz") || _.endsWith(name.toLocaleLowerCase(), ".tgz") || _.endsWith(name.toLocaleLowerCase(), ".tar"));
         });
-        self.enableTranslationUpload = ko.computed(function() {
+        self.enableTranslationUpload = ko.pureComputed(function() {
             var name = self.translationUploadFilename();
             return name !== undefined && name.trim() != "" && !self.invalidTranslationArchive();
         });
@@ -83,6 +96,8 @@ $(function() {
             }
         };
 
+        self.webcam_available_ratios = ["16:9", "4:3"];
+
         var auto_locale = {language: "_default", display: gettext("Autodetect from browser"), english: undefined};
         self.locales = ko.observableArray([auto_locale].concat(_.sortBy(_.values(AVAILABLE_LOCALES), function(n) {
             return n.display;
@@ -96,12 +111,18 @@ $(function() {
         self.appearance_name = ko.observable(undefined);
         self.appearance_color = ko.observable(undefined);
         self.appearance_colorTransparent = ko.observable();
+        self.appearance_colorIcon = ko.observable();
         self.appearance_defaultLanguage = ko.observable();
+        self.appearance_showFahrenheitAlso = ko.observable(undefined);
 
         self.printer_defaultExtrusionLength = ko.observable(undefined);
 
         self.webcam_streamUrl = ko.observable(undefined);
+        self.webcam_streamRatio = ko.observable(undefined);
+        self.webcam_streamTimeout = ko.observable(undefined);
         self.webcam_snapshotUrl = ko.observable(undefined);
+        self.webcam_snapshotTimeout = ko.observable(undefined);
+        self.webcam_snapshotSslValidation = ko.observable(undefined);
         self.webcam_ffmpegPath = ko.observable(undefined);
         self.webcam_bitrate = ko.observable(undefined);
         self.webcam_ffmpegThreads = ko.observable(undefined);
@@ -111,17 +132,18 @@ $(function() {
         self.webcam_rotate90 = ko.observable(undefined);
 
         self.feature_gcodeViewer = ko.observable(undefined);
+        self.feature_sizeThreshold = ko.observable();
+        self.feature_mobileSizeThreshold = ko.observable();
+        self.feature_sizeThreshold_str = sizeObservable(self.feature_sizeThreshold);
+        self.feature_mobileSizeThreshold_str = sizeObservable(self.feature_mobileSizeThreshold);
         self.feature_temperatureGraph = ko.observable(undefined);
-        self.feature_waitForStart = ko.observable(undefined);
-        self.feature_sendChecksum = ko.observable("print");
         self.feature_sdSupport = ko.observable(undefined);
-        self.feature_sdAlwaysAvailable = ko.observable(undefined);
-        self.feature_swallowOkAfterResend = ko.observable(undefined);
-        self.feature_repetierTargetTemp = ko.observable(undefined);
-        self.feature_disableExternalHeatupDetection = ko.observable(undefined);
         self.feature_keyboardControl = ko.observable(undefined);
         self.feature_pollWatched = ko.observable(undefined);
-        self.feature_ignoreIdenticalResends = ko.observable(undefined);
+        self.feature_modelSizeDetection = ko.observable(undefined);
+        self.feature_printCancelConfirmation = ko.observable(undefined);
+        self.feature_g90InfluencesExtruder = ko.observable(undefined);
+        self.feature_autoUppercaseBlacklist = ko.observable(undefined);
 
         self.serial_port = ko.observable();
         self.serial_baudrate = ko.observable();
@@ -131,15 +153,44 @@ $(function() {
         self.serial_timeoutConnection = ko.observable(undefined);
         self.serial_timeoutDetection = ko.observable(undefined);
         self.serial_timeoutCommunication = ko.observable(undefined);
+        self.serial_timeoutCommunicationBusy = ko.observable(undefined);
         self.serial_timeoutTemperature = ko.observable(undefined);
         self.serial_timeoutTemperatureTargetSet = ko.observable(undefined);
+        self.serial_timeoutTemperatureAutoreport = ko.observable(undefined);
         self.serial_timeoutSdStatus = ko.observable(undefined);
+        self.serial_timeoutSdStatusAutoreport = ko.observable(undefined);
+        self.serial_timeoutBaudrateDetectionPause = ko.observable(undefined);
+        self.serial_timeoutPositionLogWait = ko.observable(undefined);
         self.serial_log = ko.observable(undefined);
         self.serial_additionalPorts = ko.observable(undefined);
         self.serial_additionalBaudrates = ko.observable(undefined);
         self.serial_longRunningCommands = ko.observable(undefined);
         self.serial_checksumRequiringCommands = ko.observable(undefined);
         self.serial_helloCommand = ko.observable(undefined);
+        self.serial_serialErrorBehaviour = ko.observable("cancel");
+        self.serial_triggerOkForM29 = ko.observable(undefined);
+        self.serial_blockM0M1 = ko.observable(undefined);
+        self.serial_waitForStart =  ko.observable(undefined);
+        self.serial_sendChecksum =  ko.observable("print");
+        self.serial_sdRelativePath =  ko.observable(undefined);
+        self.serial_sdAlwaysAvailable =  ko.observable(undefined);
+        self.serial_swallowOkAfterResend =  ko.observable(undefined);
+        self.serial_repetierTargetTemp =  ko.observable(undefined);
+        self.serial_disableExternalHeatupDetection =  ko.observable(undefined);
+        self.serial_ignoreIdenticalResends =  ko.observable(undefined);
+        self.serial_firmwareDetection =  ko.observable(undefined);
+        self.serial_blockWhileDwelling =  ko.observable(undefined);
+        self.serial_supportResendsWithoutOk = ko.observable(undefined);
+        self.serial_logPositionOnPause = ko.observable(undefined);
+        self.serial_logPositionOnCancel = ko.observable(undefined);
+        self.serial_abortHeatupOnCancel = ko.observable(undefined);
+        self.serial_maxTimeoutsIdle = ko.observable(undefined);
+        self.serial_maxTimeoutsPrinting = ko.observable(undefined);
+        self.serial_maxTimeoutsLong = ko.observable(undefined);
+        self.serial_capAutoreportTemp = ko.observable(undefined);
+        self.serial_capAutoreportSdStatus = ko.observable(undefined);
+        self.serial_capBusyProtocol = ko.observable(undefined);
+        self.serial_capEmergencyParser = ko.observable(undefined);
 
         self.folder_uploads = ko.observable(undefined);
         self.folder_timelapse = ko.observable(undefined);
@@ -154,9 +205,13 @@ $(function() {
         self.scripts_gcode_beforePrintResumed = ko.observable(undefined);
         self.scripts_gcode_afterPrinterConnected = ko.observable(undefined);
         self.scripts_gcode_beforePrinterDisconnected = ko.observable(undefined);
+        self.scripts_gcode_afterToolChange = ko.observable(undefined);
+        self.scripts_gcode_beforeToolChange = ko.observable(undefined);
 
         self.temperature_profiles = ko.observableArray(undefined);
         self.temperature_cutoff = ko.observable(undefined);
+        self.temperature_sendAutomatically = ko.observable(undefined);
+        self.temperature_sendAutomaticallyAfter = ko.observable(undefined);
 
         self.system_actions = ko.observableArray([]);
 
@@ -171,6 +226,15 @@ $(function() {
         self.server_diskspace_warning_str = sizeObservable(self.server_diskspace_warning);
         self.server_diskspace_critical_str = sizeObservable(self.server_diskspace_critical);
 
+        self.server_onlineCheck_enabled = ko.observable();
+        self.server_onlineCheck_interval = ko.observable();
+        self.server_onlineCheck_host = ko.observable();
+        self.server_onlineCheck_port = ko.observable();
+
+        self.server_pluginBlacklist_enabled = ko.observable();
+        self.server_pluginBlacklist_url = ko.observable();
+        self.server_pluginBlacklist_ttl = ko.observable();
+
         self.settings = undefined;
         self.lastReceivedSettings = undefined;
 
@@ -183,6 +247,51 @@ $(function() {
             self.webcam_ffmpegPathBroken(false);
         };
 
+        self.server_onlineCheckText = ko.observable();
+        self.server_onlineCheckOk = ko.observable(false);
+        self.server_onlineCheckBroken = ko.observable(false);
+        self.server_onlineCheckReset = function() {
+            self.server_onlineCheckText("");
+            self.server_onlineCheckOk(false);
+            self.server_onlineCheckBroken(false);
+        };
+
+        var folderTypes = ["uploads", "timelapse", "timelapseTmp", "logs", "watched"];
+        self.testFolderConfigText = {};
+        self.testFolderConfigOk = {};
+        self.testFolderConfigBroken = {};
+        _.each(folderTypes, function(folderType) {
+            self.testFolderConfigText[folderType] = ko.observable("");
+            self.testFolderConfigOk[folderType] = ko.observable(false);
+            self.testFolderConfigBroken[folderType] = ko.observable(false);
+        });
+        self.testFolderConfigReset = function() {
+            _.each(folderTypes, function(folderType) {
+                self.testFolderConfigText[folderType]("");
+                self.testFolderConfigOk[folderType](false);
+                self.testFolderConfigBroken[folderType](false);
+            });
+        };
+
+        self.observableCopies = {
+            "feature_waitForStart": "serial_waitForStart",
+            "feature_sendChecksum": "serial_sendChecksum",
+            "feature_sdRelativePath": "serial_sdRelativePath",
+            "feature_sdAlwaysAvailable": "serial_sdAlwaysAvailable",
+            "feature_swallowOkAfterResend": "serial_swallowOkAfterResend",
+            "feature_repetierTargetTemp": "serial_repetierTargetTemp",
+            "feature_disableExternalHeatupDetection": "serial_disableExternalHeatupDetection",
+            "feature_ignoreIdenticalResends": "serial_ignoreIdenticalResends",
+            "feature_firmwareDetection": "serial_firmwareDetection",
+            "feature_blockWhileDwelling": "serial_blockWhileDwelling",
+            "serial_": "feature_"
+        };
+        _.each(self.observableCopies, function(value, key) {
+            if (self.hasOwnProperty(value)) {
+                self[key] = self[value];
+            }
+        });
+
         self.addTemperatureProfile = function() {
             self.temperature_profiles.push({name: "New", extruder:0, bed:0});
         };
@@ -192,15 +301,20 @@ $(function() {
         };
 
         self.addTerminalFilter = function() {
-            self.terminalFilters.push({name: "New", regex: "(Send: M105)|(Recv: ok T:)"})
+            self.terminalFilters.push({name: "New", regex: "(Send: (N\d+\s+)?M105)|(Recv:\s+(ok\s+)?.*(B|T\d*):\d+)"})
         };
 
         self.removeTerminalFilter = function(filter) {
             self.terminalFilters.remove(filter);
         };
 
+        self.testWebcamStreamUrlBusy = ko.observable(false);
         self.testWebcamStreamUrl = function() {
             if (!self.webcam_streamUrl()) {
+                return;
+            }
+
+            if (self.testWebcamStreamUrlBusy()) {
                 return;
             }
 
@@ -209,63 +323,98 @@ $(function() {
             var message = $("<p></p>")
                 .append(text)
                 .append(image);
+
+            self.testWebcamStreamUrlBusy(true);
             showMessageDialog({
                 title: gettext("Stream test"),
-                message: message
+                message: message,
+                onclose: function() {
+                    self.testWebcamStreamUrlBusy(false);
+                }
             });
         };
 
+        self.testWebcamSnapshotUrlBusy = ko.observable(false);
         self.testWebcamSnapshotUrl = function(viewModel, event) {
             if (!self.webcam_snapshotUrl()) {
                 return;
             }
 
-            var target = $(event.target);
-            target.prepend('<i class="icon-spinner icon-spin"></i> ');
+            if (self.testWebcamSnapshotUrlBusy()) {
+                return;
+            }
 
             var errorText = gettext("Could not retrieve snapshot URL, please double check the URL");
             var errorTitle = gettext("Snapshot test failed");
 
-            OctoPrint.util.testUrl(self.webcam_snapshotUrl(), {method: "GET", response: true})
+            self.testWebcamSnapshotUrlBusy(true);
+            OctoPrint.util.testUrl(self.webcam_snapshotUrl(), {
+                method: "GET",
+                response: "bytes",
+                timeout: self.webcam_snapshotTimeout(),
+                validSsl: self.webcam_snapshotSslValidation(),
+                content_type_whitelist: ["image/*"]
+            })
                 .done(function(response) {
-                    $("i.icon-spinner", target).remove();
-
                     if (!response.result) {
+                        if (response.status && response.response && response.response.content_type) {
+                            // we could contact the server, but something else was wrong, probably the mime type
+                            errorText = gettext("Could retrieve the snapshot URL, but it didn't look like an " +
+                                                "image. Got this as a content type header: <code>%(content_type)s</code>. Please " +
+                                                "double check that the URL is returning static images, not multipart data " +
+                                                "or videos.");
+                            errorText = _.sprintf(errorText, {content_type: response.response.content_type});
+                        }
+
                         showMessageDialog({
                             title: errorTitle,
-                            message: errorText
+                            message: errorText,
+                            onclose: function() {
+                                self.testWebcamSnapshotUrlBusy(false);
+                            }
                         });
                         return;
                     }
 
                     var content = response.response.content;
-                    var mimeType = "image/jpeg";
+                    var contentType = response.response.content_type
 
-                    var headers = response.response.headers;
-                    if (headers && headers["mime-type"]) {
-                        mimeType = headers["mime-type"];
+                    var mimeType = "image/jpeg";
+                    if (contentType) {
+                        mimeType = contentType.split(";")[0];
                     }
 
                     var text = gettext("If you see your webcam snapshot picture below, the entered snapshot URL is ok.");
                     showMessageDialog({
                         title: gettext("Snapshot test"),
-                        message: $('<p>' + text + '</p><p><img src="data:' + mimeType + ';base64,' + content + '" /></p>')
+                        message: $('<p>' + text + '</p><p><img src="data:' + mimeType + ';base64,' + content + '" /></p>'),
+                        onclose: function() {
+                            self.testWebcamSnapshotUrlBusy(false);
+                        }
                     });
                 })
                 .fail(function() {
-                    $("i.icon-spinner", target).remove();
                     showMessageDialog({
                         title: errorTitle,
-                        message: errorText
+                        message: errorText,
+                        onclose: function() {
+                            self.testWebcamSnapshotUrlBusy(false);
+                        }
                     });
                 });
         };
 
+        self.testWebcamFfmpegPathBusy = ko.observable(false);
         self.testWebcamFfmpegPath = function() {
             if (!self.webcam_ffmpegPath()) {
                 return;
             }
 
+            if (self.testWebcamFfmpegPathBusy()) {
+                return;
+            }
+
+            self.testWebcamFfmpegPathBusy(true);
             OctoPrint.util.testExecutable(self.webcam_ffmpegPath())
                 .done(function(response) {
                     if (!response.result) {
@@ -281,15 +430,76 @@ $(function() {
                     }
                     self.webcam_ffmpegPathOk(response.result);
                     self.webcam_ffmpegPathBroken(!response.result);
+                })
+                .always(function() {
+                    self.testWebcamFfmpegPathBusy(false);
                 });
         };
 
-        self.onSettingsShown = function() {
-            self.requestData();
+        self.testOnlineConnectivityConfigBusy = ko.observable(false);
+        self.testOnlineConnectivityConfig = function() {
+            if (!self.server_onlineCheck_host()) return;
+            if (!self.server_onlineCheck_port()) return;
+            if (self.testOnlineConnectivityConfigBusy()) return;
+
+            self.testOnlineConnectivityConfigBusy(true);
+            OctoPrint.util.testServer(self.server_onlineCheck_host(), self.server_onlineCheck_port())
+                .done(function(response) {
+                    if (!response.result) {
+                        self.server_onlineCheckText(gettext("The server is not reachable"));
+                    } else {
+                        self.server_onlineCheckText(gettext("The server is reachable"));
+                    }
+                    self.server_onlineCheckOk(response.result);
+                    self.server_onlineCheckBroken(!response.result);
+                })
+                .always(function() {
+                    self.testOnlineConnectivityConfigBusy(false);
+                });
+        };
+
+        self.testFolderConfigBusy = ko.observable(false);
+        self.testFolderConfig = function(folder) {
+            var observable = "folder_" + folder;
+            if (!self.hasOwnProperty(observable)) return;
+
+            if (self.testFolderConfigBusy()) return;
+            self.testFolderConfigBusy(true);
+
+            var opts = {
+                check_type: "dir",
+                check_access: "w",
+                allow_create_dir: true,
+                check_writable_dir: true
+            };
+            var path = self[observable]();
+            OctoPrint.util.testPath(path, opts)
+                .done(function(response) {
+                    if (!response.result) {
+                        if (response.broken_symlink) {
+                            self.testFolderConfigText[folder](gettext("The path is a broken symlink."));
+                        } else if (!response.exists) {
+                            self.testFolderConfigText[folder](gettext("The path does not exist and cannot be created."));
+                        } else if (!response.typeok) {
+                            self.testFolderConfigText[folder](gettext("The path is not a folder."));
+                        } else if (!response.access) {
+                            self.testFolderConfigText[folder](gettext("The path is not writable."));
+                        }
+                    } else {
+                        self.testFolderConfigText[folder](gettext("The path is valid"));
+                    }
+                    self.testFolderConfigOk[folder](response.result);
+                    self.testFolderConfigBroken[folder](!response.result);
+                })
+                .always(function() {
+                    self.testFolderConfigBusy(false);
+                });
         };
 
         self.onSettingsHidden = function() {
             self.webcam_ffmpegPathReset();
+            self.server_onlineCheckReset();
+            self.testFolderConfigReset();
         };
 
         self.isDialogActive = function() {
@@ -337,12 +547,14 @@ $(function() {
             self.allViewModels = allViewModels;
 
             self.settingsDialog.on('show', function(event) {
+                OctoPrint.coreui.settingsOpen = true;
                 if (event.target.id == "settings_dialog") {
                     self.requestTranslationData();
                     callViewModels(allViewModels, "onSettingsShown");
                 }
             });
             self.settingsDialog.on('hidden', function(event) {
+                OctoPrint.coreui.settingsOpen = false;
                 if (event.target.id == "settings_dialog") {
                     callViewModels(allViewModels, "onSettingsHidden");
                 }
@@ -363,9 +575,20 @@ $(function() {
                 self.requestData(undefined, true);
                 return false;
             });
+
+            // reset scroll position on tab change
+            $('ul.nav-list a[data-toggle="tab"]', self.settingsDialog).on("show", function() {
+                self._resetScrollPosition();
+            });
         };
 
-        self.show = function() {
+        self.show = function(tab) {
+            // select first or specified tab
+            self.selectTab(tab);
+
+            // reset scroll position
+            self._resetScrollPosition();
+
             // show settings, ensure centered position
             self.settingsDialog.modal({
                 minHeight: function() { return Math.max($.fn.modal.defaults.maxHeight() - 80, 250); }
@@ -379,6 +602,23 @@ $(function() {
 
         self.hide = function() {
             self.settingsDialog.modal("hide");
+        };
+
+        self.generateApiKey = function() {
+            if (!CONFIG_ACCESS_CONTROL) return;
+
+            showConfirmationDialog(gettext("This will generate a new API Key. The old API Key will cease to function immediately."),
+                function() {
+                    OctoPrint.settings.generateApiKey()
+                        .done(function(response) {
+                            self.api_key(response.apikey);
+                            self.requestData();
+                        });
+                });
+        };
+
+        self.copyApiKey = function() {
+            copyToClipboard(self.api_key());
         };
 
         self.showTranslationManager = function() {
@@ -431,6 +671,9 @@ $(function() {
             // perform the request
             self.receiving(true);
             return OctoPrint.settings.get()
+                .always(function() {
+                    self.receiving(false);
+                })
                 .done(function(response) {
                     self.fromResponse(response, local);
 
@@ -454,9 +697,6 @@ $(function() {
                         deferred.reject(args);
                     });
                     self.outstanding = [];
-                })
-                .always(function() {
-                    self.receiving(false);
                 });
         };
 
@@ -507,7 +747,7 @@ $(function() {
             return item.display + ((item.english != undefined) ? ' (' + item.english + ')' : '');
         };
 
-        self.languagePacksAvailable = ko.computed(function() {
+        self.languagePacksAvailable = ko.pureComputed(function() {
             return self.translations.allSize() > 0;
         });
 
@@ -528,15 +768,18 @@ $(function() {
             // some special read functions for various observables
             var specialMappings = {
                 feature: {
-                    externalHeatupDetection: function() { return !self.feature_disableExternalHeatupDetection()},
-                    alwaysSendChecksum: function() { return self.feature_sendChecksum() == "always"},
-                    neverSendChecksum: function() { return self.feature_sendChecksum() == "never"}
+                    autoUppercaseBlacklist: function() { return splitTextToArray(self.feature_autoUppercaseBlacklist(), ",", true) }
                 },
                 serial: {
                     additionalPorts : function() { return commentableLinesToArray(self.serial_additionalPorts()) },
                     additionalBaudrates: function() { return _.map(splitTextToArray(self.serial_additionalBaudrates(), ",", true, function(item) { return !isNaN(parseInt(item)); }), function(item) { return parseInt(item); }) },
                     longRunningCommands: function() { return splitTextToArray(self.serial_longRunningCommands(), ",", true) },
-                    checksumRequiringCommands: function() { return splitTextToArray(self.serial_checksumRequiringCommands(), ",", true) }
+                    checksumRequiringCommands: function() { return splitTextToArray(self.serial_checksumRequiringCommands(), ",", true) },
+                    externalHeatupDetection: function() { return !self.serial_disableExternalHeatupDetection()},
+                    alwaysSendChecksum: function() { return self.serial_sendChecksum() === "always"},
+                    neverSendChecksum: function() { return self.serial_sendChecksum() === "never"},
+                    ignoreErrorsFromFirmware: function() { return self.serial_serialErrorBehaviour() === "ignore"},
+                    disconnectOnErrors: function() { return self.serial_serialErrorBehaviour() === "disconnect" }
                 },
                 scripts: {
                     gcode: function() {
@@ -560,6 +803,23 @@ $(function() {
                         });
                         return result;
                     }
+                },
+                temperature: {
+                    profiles: function() {
+                        var result = [];
+                        _.each(self.temperature_profiles(), function(profile) {
+                            try {
+                                result.push({
+                                    name: profile.name,
+                                    extruder: Math.floor(_.isNumber(profile.extruder) ? profile.extruder : parseInt(profile.extruder)),
+                                    bed: Math.floor(_.isNumber(profile.bed) ? profile.bed : parseInt(profile.bed))
+                                });
+                            } catch (ex) {
+                                // ignore
+                            }
+                        });
+                        return result;
+                    }
                 }
             };
 
@@ -572,6 +832,11 @@ $(function() {
                     var observable = key;
                     if (keyPrefix != undefined) {
                         observable = keyPrefix + "_" + observable;
+                    }
+
+                    if (self.observableCopies.hasOwnProperty(observable)) {
+                        // only a copy, skip
+                        return;
                     }
 
                     if (mapping && mapping[key] && _.isFunction(mapping[key])) {
@@ -639,15 +904,18 @@ $(function() {
                     }
                 },
                 feature: {
-                    externalHeatupDetection: function(value) { self.feature_disableExternalHeatupDetection(!value) },
-                    alwaysSendChecksum: function(value) { if (value) { self.feature_sendChecksum("always")}},
-                    neverSendChecksum: function(value) { if (value) { self.feature_sendChecksum("never")}}
+                    autoUppercaseBlacklist: function(value) { self.feature_autoUppercaseBlacklist(value.join(", "))}
                 },
                 serial: {
                     additionalPorts : function(value) { self.serial_additionalPorts(value.join("\n"))},
                     additionalBaudrates: function(value) { self.serial_additionalBaudrates(value.join(", "))},
                     longRunningCommands: function(value) { self.serial_longRunningCommands(value.join(", "))},
-                    checksumRequiringCommands: function(value) { self.serial_checksumRequiringCommands(value.join(", "))}
+                    checksumRequiringCommands: function(value) { self.serial_checksumRequiringCommands(value.join(", "))},
+                    externalHeatupDetection: function(value) { self.serial_disableExternalHeatupDetection(!value) },
+                    alwaysSendChecksum: function(value) { if (value) { self.serial_sendChecksum("always")}},
+                    neverSendChecksum: function(value) { if (value) { self.serial_sendChecksum("never")}},
+                    ignoreErrorsFromFirmware: function(value) { if (value) {self.serial_serialErrorBehaviour("ignore")}},
+                    disconnectOnErrors: function(value) { if (value) {self.serial_serialErrorBehaviour("disconnect")}}
                 },
                 terminalFilters: function(value) { self.terminalFilters($.extend(true, [], value)) },
                 temperature: {
@@ -667,6 +935,11 @@ $(function() {
                         observable = keyPrefix + "_" + observable;
                     }
 
+                    if (self.observableCopies.hasOwnProperty(observable)) {
+                        // only a copy, skip
+                        return;
+                    }
+
                     var haveLocalVersion = local && local.hasOwnProperty(key);
 
                     if (mapping && mapping[key] && _.isFunction(mapping[key]) && !haveLocalVersion) {
@@ -683,7 +956,16 @@ $(function() {
             };
 
             mapToObservables(serverChangedData, specialMappings, clientChangedData);
+
+            firstRequest.resolve();
         };
+
+        self.cancelData = function () {
+            // revert unsaved changes
+            self.fromResponse(self.lastReceivedSettings);
+
+            self.hide();
+        }
 
         self.saveData = function (data, successCallback, setAsSending) {
             var options;
@@ -698,6 +980,7 @@ $(function() {
 
             self.settingsDialog.trigger("beforeSave");
 
+            self.sawUpdateEventWhileSending = false;
             self.sending(data == undefined || options.sending || false);
 
             if (data == undefined) {
@@ -705,10 +988,15 @@ $(function() {
                 data = getOnlyChangedData(self.getLocalData(), self.lastReceivedSettings);
             }
 
+            self.active = true;
             return OctoPrint.settings.save(data)
                 .done(function(data, status, xhr) {
+                    self.ignoreNextUpdateEvent = !self.sawUpdateEventWhileSending;
+                    self.active = false;
+
                     self.receiving(true);
                     self.sending(false);
+
                     try {
                         self.fromResponse(data);
                         if (options.success) options.success(data, status, xhr);
@@ -718,6 +1006,7 @@ $(function() {
                 })
                 .fail(function(xhr, status, error) {
                     self.sending(false);
+                    self.active = false;
                     if (options.error) options.error(xhr, status, error);
                 })
                 .always(function(xhr, status) {
@@ -726,6 +1015,10 @@ $(function() {
         };
 
         self.onEventSettingsUpdated = function() {
+            if (self.active) {
+                self.sawUpdateEventWhileActive = true;
+            }
+
             var preventSettingsRefresh = _.any(self.allViewModels, function(viewModel) {
                 if (viewModel.hasOwnProperty("onSettingsPreventRefresh")) {
                     try {
@@ -746,7 +1039,8 @@ $(function() {
 
             if (self.isDialogActive()) {
                 // dialog is open and not currently busy...
-                if (self.sending() || self.receiving()) {
+                if (self.sending() || self.receiving() || self.active || self.ignoreNextUpdateEvent) {
+                    self.ignoreNextUpdateEvent = false;
                     return;
                 }
 
@@ -762,11 +1056,49 @@ $(function() {
                 self.requestData();
             }
         };
+
+        self._resetScrollPosition = function() {
+            $('#settings_dialog_content', self.settingsDialog).scrollTop(0);
+
+            // also reset any contained tabs/pills/lists to first pane
+            $('#settings_dialog_content ul.nav-pills a[data-toggle="tab"]:first', self.settingsDialog).tab("show");
+            $('#settings_dialog_content ul.nav-list a[data-toggle="tab"]:first', self.settingsDialog).tab("show");
+            $('#settings_dialog_content ul.nav-tabs a[data-toggle="tab"]:first', self.settingsDialog).tab("show");
+        };
+
+        self.selectTab = function(tab) {
+            if (tab != undefined) {
+                if (!_.startsWith(tab, "#")) {
+                    tab = "#" + tab;
+                }
+                $('ul.nav-list a[href="' + tab + '"]', self.settingsDialog).tab("show");
+            } else {
+                $('ul.nav-list a[data-toggle="tab"]:first', self.settingsDialog).tab("show");
+            }
+        };
+
+        self.onServerReconnect = function() {
+            // the settings might have changed if the server was just restarted,
+            // better refresh them now
+            self.requestData();
+        };
+
+        self.onUserLoggedIn = function() {
+            // we might have other user rights now, refresh (but only if startup has fully completed)
+            if (!self._startupComplete) return;
+            self.requestData();
+        };
+
+        self.onUserLoggedOut = function() {
+            // we might have other user rights now, refresh (but only if startup has fully completed)
+            if (!self._startupComplete) return;
+            self.requestData();
+        }
     }
 
-    OCTOPRINT_VIEWMODELS.push([
-        SettingsViewModel,
-        ["loginStateViewModel", "usersViewModel", "printerProfilesViewModel"],
-        ["#settings_dialog", "#navbar_settings"]
-    ]);
+    OCTOPRINT_VIEWMODELS.push({
+        construct: SettingsViewModel,
+        dependencies: ["loginStateViewModel", "usersViewModel", "printerProfilesViewModel", "aboutViewModel"],
+        elements: ["#settings_dialog", "#navbar_settings"]
+    });
 });

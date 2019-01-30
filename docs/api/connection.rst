@@ -39,7 +39,7 @@ Get connection settings
         "options": {
           "ports": ["/dev/ttyACM0", "VIRTUAL"],
           "baudrates": [250000, 230400, 115200, 57600, 38400, 19200, 9600],
-          "printerProfiles": [{"name": "Default", id: "_default"}],
+          "printerProfiles": [{"name": "Default", "id": "_default"}],
           "portPreference": "/dev/ttyACM0",
           "baudratePreference": 250000,
           "printerProfilePreference": "_default",
@@ -76,10 +76,12 @@ Issue a connection command
      Instructs OctoPrint to disconnect from the printer.
 
    fake_ack
-     Fakes an acknowledgement message for OctoPrint in case one got lost on the serial line and the communication
+     Fakes an acknowledgment message for OctoPrint in case one got lost on the serial line and the communication
      with the printer since stalled. This should only be used in "emergencies" (e.g. to save prints), the reason
-     for the lost acknowledgement should always be properly investigated and removed instead of depending on this
+     for the lost acknowledgment should always be properly investigated and removed instead of depending on this
      "symptom solver".
+
+   Requires user rights.
 
    **Example Connect Request**
 

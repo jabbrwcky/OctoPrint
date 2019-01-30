@@ -1,5 +1,5 @@
 # coding=utf-8
-from __future__ import absolute_import
+from __future__ import absolute_import, division, print_function
 
 __author__ = "Gina Häußge <osd@foosel.net>"
 __license__ = 'GNU Affero General Public License http://www.gnu.org/licenses/agpl.html'
@@ -23,7 +23,7 @@ class TestCommHelpers(unittest.TestCase):
 	@unpack
 	def test_strip_comment(self, input, expected):
 		from octoprint.util import comm
-		self.assertEquals(expected, comm.strip_comment(input))
+		self.assertEqual(expected, comm.strip_comment(input))
 
 	@data(
 		("M117 Test", None, None, "M117 Test"),
@@ -34,7 +34,7 @@ class TestCommHelpers(unittest.TestCase):
 	@unpack
 	def test_process_gcode_line(self, input, offsets, current_tool, expected):
 		from octoprint.util import comm
-		self.assertEquals(expected, comm.process_gcode_line(input, offsets=offsets, current_tool=current_tool))
+		self.assertEqual(expected, comm.process_gcode_line(input, offsets=offsets, current_tool=current_tool))
 
 	@data(
 		("M104 S200", None, None, None),
@@ -58,16 +58,16 @@ class TestCommHelpers(unittest.TestCase):
 		actual = comm.apply_temperature_offsets(input, offsets, current_tool=current_tool)
 
 		if expected is None:
-			self.assertEquals(input, actual)
+			self.assertEqual(input, actual)
 		else:
 			import re
 			match = re.search("S(\d+(\.\d+)?)", actual)
 			if not match:
 				self.fail("No temperature found")
 			temperature = float(match.group(1))
-			self.assertEquals(expected, temperature)
-			self.assertEquals(input[:match.start(1)], actual[:match.start(1)])
-			self.assertEquals(input[match.end(1):], actual[match.end(1):])
+			self.assertEqual(expected, temperature)
+			self.assertEqual(input[:match.start(1)], actual[:match.start(1)])
+			self.assertEqual(input[match.end(1):], actual[match.end(1):])
 
 	def test_convert_pause_triggers(self):
 		configured_triggers = [
@@ -86,13 +86,13 @@ class TestCommHelpers(unittest.TestCase):
 		self.assertIsNotNone(trigger_matchers)
 
 		self.assertIn("enable", trigger_matchers)
-		self.assertEquals("(pause1)|(pause2)", trigger_matchers["enable"].pattern)
+		self.assertEqual("(pause1)|(pause2)", trigger_matchers["enable"].pattern)
 
 		self.assertIn("disable", trigger_matchers)
-		self.assertEquals("(resume)", trigger_matchers["disable"].pattern)
+		self.assertEqual("(resume)", trigger_matchers["disable"].pattern)
 
 		self.assertIn("toggle", trigger_matchers)
-		self.assertEquals("(toggle)", trigger_matchers["toggle"].pattern)
+		self.assertEqual("(toggle)", trigger_matchers["toggle"].pattern)
 
 		self.assertNotIn("unknown", trigger_matchers)
 
@@ -127,35 +127,35 @@ class TestCommHelpers(unittest.TestCase):
 		from octoprint.util import comm
 		controls, matcher = comm.convert_feedback_controls(configured_controls)
 
-		self.assertEquals(2, len(controls))
+		self.assertEqual(2, len(controls))
 
 		# temp_regex is used twice, so we should have two templates for it
 		self.assertIn(temp_key, controls)
 		temp = controls[temp_key]
 
 		self.assertIsNotNone(temp["matcher"])
-		self.assertEquals(temp_regex, temp["matcher"].pattern)
-		self.assertEquals(temp_regex, temp["pattern"])
+		self.assertEqual(temp_regex, temp["matcher"].pattern)
+		self.assertEqual(temp_regex, temp["pattern"])
 
-		self.assertEquals(2, len(temp["templates"]))
+		self.assertEqual(2, len(temp["templates"]))
 		self.assertIn(temp_template_key, temp["templates"])
-		self.assertEquals(temp_template, temp["templates"][temp_template_key])
+		self.assertEqual(temp_template, temp["templates"][temp_template_key])
 		self.assertIn(temp2_template_key, temp["templates"])
-		self.assertEquals(temp2_template, temp["templates"][temp2_template_key])
+		self.assertEqual(temp2_template, temp["templates"][temp2_template_key])
 
 		# x_regex is used once, so we should have only one template for it
 		self.assertIn(x_key, controls)
 		x = controls[x_key]
 
 		self.assertIsNotNone(x["matcher"])
-		self.assertEquals(x_regex, x["matcher"].pattern)
-		self.assertEquals(x_regex, x["pattern"])
+		self.assertEqual(x_regex, x["matcher"].pattern)
+		self.assertEqual(x_regex, x["pattern"])
 
-		self.assertEquals(1, len(x["templates"]))
+		self.assertEqual(1, len(x["templates"]))
 		self.assertIn(x_template_key, x["templates"])
-		self.assertEquals(x_template, x["templates"][x_template_key])
+		self.assertEqual(x_template, x["templates"][x_template_key])
 
-		self.assertEquals("(?P<group{temp_key}>{temp_regex})|(?P<group{x_key}>{x_regex})".format(**locals()), matcher.pattern)
+		self.assertEqual("(?P<group{temp_key}>{temp_regex})|(?P<group{x_key}>{x_regex})".format(**locals()), matcher.pattern)
 
 	@data(
 		("G4 P2.0", "floatP", True, "2.0"),
@@ -178,7 +178,7 @@ class TestCommHelpers(unittest.TestCase):
 
 		if should_match:
 			self.assertIsNotNone(match)
-			self.assertEquals(expected_value, match.group("value"))
+			self.assertEqual(expected_value, match.group("value"))
 		else:
 			self.assertIsNone(match)
 
@@ -196,32 +196,60 @@ class TestCommHelpers(unittest.TestCase):
 	def test_gcode_command_for_cmd(self, cmd, expected):
 		from octoprint.util.comm import gcode_command_for_cmd
 		result = gcode_command_for_cmd(cmd)
-		self.assertEquals(expected, result)
+		self.assertEqual(expected, result)
+
+	@data(
+		("G0 X0", "G0", None),
+		("M105", "M105", None),
+		("T2", "T", None),
+		("M80.1", "M80", "1"),
+		("G28.2", "G28", "2"),
+		("T0.3", "T", None),
+		("M80.nosubcode", "M80", None),
+		(None, None, None),
+		("No match", None, None)
+	)
+	@unpack
+	def test_gcode_and_subcode_for_cmd(self, cmd, expected_gcode, expected_subcode):
+		from octoprint.util.comm import gcode_and_subcode_for_cmd
+		actual_gcode, actual_subcode = gcode_and_subcode_for_cmd(cmd)
+		self.assertEqual(expected_gcode, actual_gcode)
+		self.assertEqual(expected_subcode, actual_subcode)
 
 	@data(
 		("T:23.0 B:60.0", 0, dict(T0=(23.0, None), B=(60.0, None)), 0),
 		("T:23.0 B:60.0", 1, dict(T1=(23.0, None), B=(60.0, None)), 1),
 		("T:23.0/220.0 B:60.0/70.0", 0, dict(T0=(23.0, 220.0), B=(60.0, 70.0)), 0),
 		("ok T:23.0/220.0 T0:23.0/220.0 T1:50.2/210.0 T2:39.4/220.0 B:60.0", 0, dict(T0=(23.0, 220.0), T1=(50.2, 210.0), T2=(39.4, 220.0), B=(60.0, None)), 2),
-		("ok T:50.2/210.0 T0:23.0/220.0 T1:50.2/210.0 T2:39.4/220.0 B:60.0", 1, dict(T0=(23.0, 220.0), T1=(50.2, 210.0), T2=(39.4, 220.0), B=(60.0, None)), 2)
+		("ok T:50.2/210.0 T0:23.0/220.0 T1:50.2/210.0 T2:39.4/220.0 B:60.0", 1, dict(T0=(23.0, 220.0), T1=(50.2, 210.0), T2=(39.4, 220.0), B=(60.0, None)), 2),
+		("ok T:-55.7/0 T0:-55.7/0 T1:150.0/210.0", 0, dict(T0=(-55.7, 0), T1=(150.0, 210.0)), 1),
+		("ok T:150.0/210.0 T0:-55.7/0 T1:150.0/210.0", 1, dict(T0=(-55.7, 0), T1=(150.0, 210.0)), 1)
 	)
 	@unpack
 	def test_process_temperature_line(self, line, current, expected_result, expected_max):
 		from octoprint.util.comm import parse_temperature_line
 		maxtool, result = parse_temperature_line(line, current)
 		self.assertDictEqual(expected_result, result)
-		self.assertEquals(expected_max, maxtool)
+		self.assertEqual(expected_max, maxtool)
 
 	@data(
+		# T => T0
 		(dict(T=(23.0,None)), 0, dict(T0=(23.0, None))),
+
+		# T => T1
 		(dict(T=(23.0,None)), 1, dict(T1=(23.0, None))),
+
+		# T and Tn present => Tn wins
 		(dict(T=(23.0, None), T0=(23.0, None), T1=(42.0, None)), 0, dict(T0=(23.0, None), T1=(42.0, None))),
 		(dict(T=(42.0, None), T0=(23.0, None), T1=(42.0, None)), 1, dict(T0=(23.0, None), T1=(42.0, None))),
-		(dict(T=(21.0, None), T0=(23.0, None), T1=(42.0, None)), 0, dict(T0=(21.0, None), T1=(42.0, None))),
-		(dict(T=(41.0, None), T0=(23.0, None), T1=(42.0, None)), 1, dict(T0=(23.0, None), T1=(41.0, None))),
-		(dict(T=(23.0, None), T1=(42.0, None)), 1, dict(T0=(23.0, None), T1=(42.0, None))),
-		(dict(T0=(23.0, None), T1=(42.0, None)), 1, dict(T0=(23.0, None), T1=(42.0, None)))
+		(dict(T=(21.0, None), T0=(23.0, None), T1=(42.0, None)), 0, dict(T0=(23.0, None), T1=(42.0, None))),
+		(dict(T=(41.0, None), T0=(23.0, None), T1=(42.0, None)), 1, dict(T0=(23.0, None), T1=(42.0, None))),
 
+		# T and no T0 => Smoothieware, T = T0
+		(dict(T=(23.0, None), T1=(42.0, None)), 1, dict(T0=(23.0, None), T1=(42.0, None))),
+
+		# no T => as-is
+		(dict(T0=(23.0, None), T1=(42.0, None)), 1, dict(T0=(23.0, None), T1=(42.0, None)))
 	)
 	@unpack
 	def test_canonicalize_temperatures(self, parsed, current, expected):
@@ -229,3 +257,161 @@ class TestCommHelpers(unittest.TestCase):
 		result = canonicalize_temperatures(parsed, current)
 		self.assertDictEqual(expected, result)
 
+	@data(
+		("KEY1:Value 1 FIRMWARE_NAME:Some Firmware With Spaces KEY2:Value 2",
+		 dict(KEY1="Value 1", KEY2="Value 2", FIRMWARE_NAME="Some Firmware With Spaces")),
+		("NAME: Malyan VER: 2.9 MODEL: M200 HW: HA02",
+		 dict(NAME="Malyan", VER="2.9", MODEL="M200", HW="HA02")),
+		("NAME. Malyan	VER: 3.8	MODEL: M100	HW: HB02",
+		 dict(NAME="Malyan", VER="3.8", MODEL="M100", HW="HB02")),
+		("NAME. Malyan VER: 3.7 MODEL: M300 HW: HG01",
+		 dict(NAME="Malyan", VER="3.7", MODEL="M300", HW="HG01")),
+		("FIRMWARE_NAME:Marlin 1.1.0 From Archive SOURCE_CODE_URL:http:// ... PROTOCOL_VERSION:1.0 MACHINE_TYPE:www.cxsw3d.com EXTRUDER_COUNT:1 UUID:00000000-0000-0000-0000-000000000000",
+		 dict(FIRMWARE_NAME="Marlin 1.1.0 From Archive",
+		      SOURCE_CODE_URL="http:// ...",
+		      PROTOCOL_VERSION="1.0",
+		      MACHINE_TYPE="www.cxsw3d.com",
+		      EXTRUDER_COUNT="1",
+		      UUID="00000000-0000-0000-0000-000000000000"))
+	)
+	@unpack
+	def test_parse_firmware_line(self, line, expected):
+		from octoprint.util.comm import parse_firmware_line
+		result = parse_firmware_line(line)
+		self.assertDictEqual(expected, result)
+
+	@data(
+		("Cap:EEPROM:1", ("EEPROM", True)),
+		("Cap:EEPROM:0", ("EEPROM", False)),
+		("AUTOREPORT_TEMP:1", ("AUTOREPORT_TEMP", True)),
+		("AUTOREPORT_TEMP:0", ("AUTOREPORT_TEMP", False)),
+		("TOO:MANY:FIELDS", None),
+		("Cap:", None),
+		("TOOLITTLEFIELDS", None),
+		("WRONG:FLAG", None),
+	)
+	@unpack
+	def test_parse_capability_line(self, line, expected):
+		from octoprint.util.comm import parse_capability_line
+		result = parse_capability_line(line)
+		self.assertEqual(expected, result)
+
+	@data(
+		("Resend:23", 23),
+		("Resend: N23", 23),
+		("Resend: N:23", 23),
+		("rs 23", 23),
+		("rs N23", 23),
+		("rs N:23", 23),
+		("rs N23 expected checksum 109", 23) # teacup, see #300
+	)
+	@unpack
+	def test_parse_resend_line(self, line, expected):
+		from octoprint.util.comm import parse_resend_line
+		result = parse_resend_line(line)
+		self.assertEqual(expected, result)
+
+	@data(
+		# Marlin
+		("ok X:62.417 Y:64.781 Z:0.2 E:2.72328 Count: A:6241 B:6478 C:20", dict(x=62.417,
+		                                                                        y=64.781,
+		                                                                        z=0.2,
+		                                                                        e=2.72328)),
+		("X:62.417 Y:64.781 Z:0.2 E:2.72328 Count: A:6241 B:6478 C:20", dict(x=62.417,
+		                                                                     y=64.781,
+		                                                                     z=0.2,
+		                                                                     e=2.72328)),
+
+		# RepRapFirmware
+		("X:96.99 Y:88.31 Z:0.30 E0:0.0 E1:0.0 E2:0.0 E3:0.0 E4:0.0 E5:0.0", dict(x=96.99,
+		                                                                          y=88.31,
+		                                                                          z=0.3,
+		                                                                          e0=0.0,
+		                                                                          e1=0.0,
+		                                                                          e2=0.0,
+		                                                                          e3=0.0,
+		                                                                          e4=0.0,
+		                                                                          e5=0.0)),
+
+		# whitespace after the :, e.g. AlfaWise U20, see #2839
+		("X:150.0 Y:150.0 Z:  0.7 E:  0.0", dict(x=150.0,
+		                                         y=150.0,
+		                                         z=0.7,
+		                                         e=0.0)),
+
+		# invalid
+		("", None),
+		("X:62.417 Y:64.781 Z:0.2", None)
+	)
+	@unpack
+	def test_parse_position_line(self, line, expected):
+		from octoprint.util.comm import parse_position_line
+		result = parse_position_line(line)
+		if expected is None:
+			self.assertIsNone(result)
+		else:
+			self.assertDictEqual(expected, result)
+
+
+class TestPositionRecord(unittest.TestCase):
+
+	def test_as_dict_regular(self):
+		coords = dict(x=1, y=2, z=3, e=4)
+
+		position = self._create_position(**coords)
+
+		expected = dict(coords)
+		expected.update(dict(f=None, t=None))
+		self.assertDictEqual(position.as_dict(), expected)
+
+	def test_as_dict_extra_e(self):
+		coords = dict(x=1, y=2, z=3, e0=4, e1=5)
+
+		position = self._create_position(**coords)
+
+		expected = dict(coords)
+		expected.update(dict(e=None, f=None, t=None))
+		self.assertDictEqual(position.as_dict(), expected)
+
+	def test_copy_from_regular(self):
+		coords = dict(x=1, y=2, z=3, e=4)
+		position1 = self._create_position(**coords)
+		position2 = self._create_position()
+
+		position2.copy_from(position1)
+
+		expected = dict(coords)
+		expected.update(dict(f=None, t=None))
+		self.assertDictEqual(position2.as_dict(), expected)
+
+	def test_copy_from_extra_e(self):
+		coords = dict(x=1, y=2, z=3, e0=4, e1=5)
+		position1 = self._create_position(**coords)
+		position2 = self._create_position()
+
+		position2.copy_from(position1)
+
+		expected = dict(coords)
+		expected.update(dict(e=None, f=None, t=None))
+		self.assertDictEqual(position2.as_dict(), expected)
+
+	def test_copy_from_extra_e_changed(self):
+		coords1 = dict(x=1, y=2, z=3, e0=4, e1=5)
+		position1 = self._create_position(**coords1)
+
+		coords2 = dict(x=2, y=4, z=6, e0=8, e1=10, e2=12)
+		position2 = self._create_position(**coords2)
+
+		expected_before = dict(coords2)
+		expected_before.update(dict(e=None, f=None, t=None))
+		self.assertDictEqual(position2.as_dict(), expected_before)
+
+		position2.copy_from(position1)
+
+		expected_after = dict(coords1)
+		expected_after.update(dict(e=None, f=None, t=None))
+		self.assertDictEqual(position2.as_dict(), expected_after)
+
+	def _create_position(self, **kwargs):
+		from octoprint.util.comm import PositionRecord
+		return PositionRecord(**kwargs)
